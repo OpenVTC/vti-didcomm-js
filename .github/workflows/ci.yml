@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tools/roundtrip-helper
+
+      # Build the cross-impl helper first. The Rust round-trip tests skip
+      # silently if `didcomm-unpack` is absent, so CI must build it or the
+      # wire-compatibility coverage is a no-op.
+      - name: Build round-trip helper
+        run: cargo build --manifest-path tools/roundtrip-helper/Cargo.toml
+
+      - run: npm ci
+
+      - run: npm test
+
+      - name: Type-check (.d.ts generation)
+        run: npm run build:types

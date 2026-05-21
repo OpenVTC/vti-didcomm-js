@@ -1,0 +1,147 @@
+{
+  "name": "@openvtc/vti-didcomm-js",
+  "version": "0.2.0",
+  "description": "Browser-side DIDComm v2 implementation for the Verifiable Trust Infrastructure. Focused subset: authcrypt/anoncrypt (ECDH-1PU/ECDH-ES + A256CBC-HS512) over X25519 and P-256, did:key + did:peer + did:webvh resolution, VTA REST auth, and ATM mediator transport. Byte-compatible with affinidi-messaging-didcomm.",
+  "type": "module",
+  "main": "src/index.js",
+  "types": "types/index.d.ts",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./types/index.d.ts",
+      "import": "./src/index.js"
+    },
+    "./base64url": {
+      "types": "./types/base64url.d.ts",
+      "import": "./src/base64url.js"
+    },
+    "./multibase": {
+      "types": "./types/multibase.d.ts",
+      "import": "./src/multibase.js"
+    },
+    "./jwk": {
+      "types": "./types/jwk.d.ts",
+      "import": "./src/jwk.js"
+    },
+    "./concat-kdf": {
+      "types": "./types/concat-kdf.d.ts",
+      "import": "./src/concat-kdf.js"
+    },
+    "./x25519": {
+      "types": "./types/x25519.d.ts",
+      "import": "./src/x25519.js"
+    },
+    "./p256": {
+      "types": "./types/p256.d.ts",
+      "import": "./src/p256.js"
+    },
+    "./key-agreement": {
+      "types": "./types/key-agreement.d.ts",
+      "import": "./src/key-agreement.js"
+    },
+    "./ecdh-1pu": {
+      "types": "./types/ecdh-1pu.d.ts",
+      "import": "./src/ecdh-1pu.js"
+    },
+    "./ecdh-es": {
+      "types": "./types/ecdh-es.d.ts",
+      "import": "./src/ecdh-es.js"
+    },
+    "./aes": {
+      "types": "./types/aes.d.ts",
+      "import": "./src/aes.js"
+    },
+    "./a256cbc-hs512": {
+      "types": "./types/a256cbc-hs512.d.ts",
+      "import": "./src/a256cbc-hs512.js"
+    },
+    "./pack": {
+      "types": "./types/pack.d.ts",
+      "import": "./src/pack.js"
+    },
+    "./anoncrypt": {
+      "types": "./types/anoncrypt.d.ts",
+      "import": "./src/anoncrypt.js"
+    },
+    "./unpack": {
+      "types": "./types/unpack.d.ts",
+      "import": "./src/unpack.js"
+    },
+    "./did-key": {
+      "types": "./types/did-key.d.ts",
+      "import": "./src/did-key.js"
+    },
+    "./did-webvh": {
+      "types": "./types/did-webvh.d.ts",
+      "import": "./src/did-webvh.js"
+    },
+    "./did-peer": {
+      "types": "./types/did-peer.d.ts",
+      "import": "./src/did-peer.js"
+    },
+    "./resolver": {
+      "types": "./types/resolver.d.ts",
+      "import": "./src/resolver.js"
+    },
+    "./vta-rest-auth": {
+      "types": "./types/vta-rest-auth.d.ts",
+      "import": "./src/vta-rest-auth.js"
+    },
+    "./forward": {
+      "types": "./types/forward.d.ts",
+      "import": "./src/forward.js"
+    },
+    "./mediator-auth": {
+      "types": "./types/mediator-auth.d.ts",
+      "import": "./src/mediator-auth.js"
+    },
+    "./mediator-transport": {
+      "types": "./types/mediator-transport.d.ts",
+      "import": "./src/mediator-transport.js"
+    },
+    "./vta-didcomm": {
+      "types": "./types/vta-didcomm.d.ts",
+      "import": "./src/vta-didcomm.js"
+    }
+  },
+  "files": [
+    "src",
+    "types",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "build:types": "tsc -p tsconfig.types.json",
+    "prepack": "npm run build:types"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OpenVTC/vti-didcomm-js.git"
+  },
+  "homepage": "https://github.com/OpenVTC/vti-didcomm-js#readme",
+  "bugs": "https://github.com/OpenVTC/vti-didcomm-js/issues",
+  "keywords": [
+    "didcomm",
+    "did",
+    "did:webvh",
+    "did:key",
+    "did:peer",
+    "authcrypt",
+    "ecdh-1pu",
+    "p-256",
+    "ssi",
+    "verifiable-trust"
+  ],
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@noble/curves": "^2.2.0",
+    "didwebvh-ts": "^2.7.4"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  }
+}

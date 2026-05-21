@@ -1,0 +1,20 @@
+[package]
+name = "vti-didcomm-roundtrip-helper"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "Test-only Rust helper for the vti-didcomm-js round-trip harness. Reads a JWE + recipient private key + (optionally) sender public key from stdin as JSON, unpacks via affinidi-messaging-didcomm, emits the result as JSON on stdout. Not for production."
+
+[[bin]]
+name = "didcomm-unpack"
+path = "src/main.rs"
+
+[dependencies]
+# Keep `affinidi-messaging-didcomm` aligned with the version the VTA +
+# mediator pin (currently 0.13) so the round-trip stays a true wire-
+# compatibility check.
+affinidi-messaging-didcomm = "0.13"
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
