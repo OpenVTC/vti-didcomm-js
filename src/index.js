@@ -26,7 +26,15 @@ export { unpack } from "./unpack.js";
 export * as didKey from "./did-key.js";
 export * as didWebvh from "./did-webvh.js";
 export * as didPeer from "./did-peer.js";
-export { createResolver, defaultResolver, resolve } from "./resolver.js";
+export {
+  createResolver,
+  defaultResolver,
+  resolve,
+  clearDidCache,
+  invalidateDid,
+  setDidCacheTtl,
+  DEFAULT_DID_CACHE_TTL_MS,
+} from "./resolver.js";
 export * as vtaRestAuth from "./vta-rest-auth.js";
 export { buildForward } from "./forward.js";
 export { authenticateToMediator, resolveMediator, parseMediatorEndpoints } from "./mediator-auth.js";

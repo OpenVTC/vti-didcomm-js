@@ -185,8 +185,11 @@ export class MediatorSession {
    *   inbound, e.g. a server-initiated request). Fired in addition to the
    *   internal buffering, so request/reply via `waitFor` is unaffected;
    *   handlers should filter by the message `type`.
+   * @param {() => void} [args.onClose] - called once if the socket drops
+   *   unexpectedly (after a successful open, not via `close()`). Lets a
+   *   warm-session holder evict + reconnect.
    */
-  constructor({ mediator, mediatorJwt, client, senderKeys, resolveSender, WebSocketImpl, onMessage }) {
+  constructor({ mediator, mediatorJwt, client, senderKeys, resolveSender, WebSocketImpl, onMessage, onClose }) {
     if (!mediator?.wsEndpoint) {
       throw new Error("MediatorSession: mediator.wsEndpoint required (mediator advertises no wss endpoint)");
     }
@@ -196,6 +199,11 @@ export class MediatorSession {
     this.senderKeys = senderKeys ?? new Map();
     this.resolveSender = resolveSender;
     this.onMessage = onMessage;
+    // Fired once when the socket drops *unexpectedly* (after a successful
+    // open, not via close()). Lets a caller holding a warm session evict +
+    // reconnect. Not fired on an intentional close().
+    this.onClose = onClose;
+    this._userClosed = false;
     this.WebSocketImpl = WebSocketImpl ?? globalThis.WebSocket;
     if (typeof this.WebSocketImpl !== "function") {
       throw new Error("MediatorSession: no WebSocket implementation available");
@@ -288,6 +296,15 @@ export class MediatorSession {
         for (const w of this._waiters.splice(0)) {
           clearTimeout(w.timer);
           w.reject(new Error("mediator-transport: WebSocket closed"));
+        }
+        // Surface an unexpected drop (the socket was open and we didn't
+        // close it ourselves) so a warm-session holder can reconnect.
+        if (!this._userClosed && this.onClose) {
+          try {
+            this.onClose();
+          } catch {
+            // A throwing handler must not break teardown.
+          }
         }
       };
     });
@@ -402,7 +419,13 @@ export class MediatorSession {
     });
   }
 
+  /** True while the underlying socket is open (live delivery active). */
+  get isOpen() {
+    return Boolean(this.ws) && this.ws.readyState === 1;
+  }
+
   close() {
+    this._userClosed = true;
     for (const w of this._waiters.splice(0)) {
       clearTimeout(w.timer);
       w.reject(new Error("mediator-transport: session closed"));
