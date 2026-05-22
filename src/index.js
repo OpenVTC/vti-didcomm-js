@@ -30,5 +30,5 @@ export { createResolver, defaultResolver, resolve } from "./resolver.js";
 export * as vtaRestAuth from "./vta-rest-auth.js";
 export { buildForward } from "./forward.js";
 export { authenticateToMediator, resolveMediator, parseMediatorEndpoints } from "./mediator-auth.js";
-export { MediatorSession, buildLiveDeliveryChange, peekSkid, unpackInbound } from "./mediator-transport.js";
+export { MediatorSession, buildLiveDeliveryChange, buildMessagesReceived, peekSkid, unpackInbound } from "./mediator-transport.js";
 export { connectVtaViaMediator, VtaMediatorClient, resolveX25519KeyAgreement } from "./vta-didcomm.js";

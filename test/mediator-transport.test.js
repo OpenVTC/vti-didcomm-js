@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   buildLiveDeliveryChange,
+  buildMessagesReceived,
   peekSkid,
   unpackInbound,
   MediatorSession,
@@ -33,12 +34,16 @@ class FakeWebSocket {
     this.protocols = protocols;
     this.sent = [];
     this.closed = false;
+    this.readyState = 0; // CONNECTING
     this.onopen = null;
     this.onmessage = null;
     this.onerror = null;
     this.onclose = null;
     FakeWebSocket.last = this;
-    setTimeout(() => this.onopen && this.onopen(), 0);
+    setTimeout(() => {
+      this.readyState = 1; // OPEN
+      this.onopen && this.onopen();
+    }, 0);
   }
   addEventListener() {}
   send(data) {
@@ -46,6 +51,7 @@ class FakeWebSocket {
   }
   close() {
     this.closed = true;
+    this.readyState = 3; // CLOSED
     this.onclose && this.onclose();
   }
   // Test helper: simulate the mediator pushing a frame.
@@ -188,6 +194,78 @@ test("MediatorSession: connect sends live-delivery-change; waitFor resolves on m
 
   session.close();
   assert.ok(ws.closed);
+});
+
+test("buildMessagesReceived: correct type + message_id_list", () => {
+  const m = buildMessagesReceived({
+    from: "did:key:zC",
+    mediatorDid: "did:key:zM",
+    messageIds: ["urn:uuid:a", "urn:uuid:b"],
+  });
+  assert.equal(m.type, "https://didcomm.org/messagepickup/3.0/messages-received");
+  assert.deepEqual(m.body.message_id_list, ["urn:uuid:a", "urn:uuid:b"]);
+  assert.equal(m.from, "did:key:zC");
+  assert.deepEqual(m.to, ["did:key:zM"]);
+});
+
+test("MediatorSession: acks delivered messages so the mediator stops replaying them", async () => {
+  const client = generateEphemeralClient();
+  const vta = generateEphemeralClient();
+  const mediatorKp = keypairDid();
+  const mediator = {
+    did: mediatorKp.did,
+    kid: mediatorKp.kid,
+    x25519Pub: mediatorKp.publicKey,
+    wsEndpoint: "wss://mediator.test/ws",
+  };
+
+  const received = [];
+  const session = new MediatorSession({
+    mediator,
+    mediatorJwt: "med.jwt.token",
+    client,
+    senderKeys: new Map([[vta.did, { publicJwk: jwk.publicJwk("X25519", vta.publicKey) }]]),
+    WebSocketImpl: FakeWebSocket,
+    onMessage: (msg) => received.push(msg),
+  });
+
+  await session.connect();
+  const ws = FakeWebSocket.last;
+  assert.equal(ws.sent.length, 1); // live-delivery-change only
+
+  // An unsolicited inbound message (no waiter claims it) — e.g. an
+  // RP-initiated confirm request.
+  const inboundId = "urn:uuid:inbound-7";
+  const inboundJwe = await pack({
+    message: {
+      id: inboundId,
+      type: "https://trusttasks.org/wallet/confirm/1.0",
+      from: vta.did,
+      to: [client.did],
+      body: { challenge: "c1" },
+    },
+    sender: { kid: vta.kid, privateJwk: jwk.privateJwk("X25519", vta.privateKey, vta.publicKey) },
+    recipient: { kid: client.kid, publicJwk: jwk.publicJwk("X25519", client.publicKey) },
+  });
+
+  ws.inject(inboundJwe);
+  // The ack is packed asynchronously; let microtasks/timers settle.
+  await new Promise((r) => setTimeout(r, 100));
+
+  assert.equal(received.length, 1);
+  // A second frame was sent: the messages-received ack, authcrypt'd to
+  // the mediator. Unpack it as the mediator and check the id list.
+  assert.equal(ws.sent.length, 2);
+  const { unpack } = await import("../src/unpack.js");
+  const ack = await unpack(
+    ws.sent[1],
+    { kid: mediatorKp.kid, privateJwk: jwk.privateJwk("X25519", mediatorKp.privateKey, mediatorKp.publicKey) },
+    { publicJwk: jwk.publicJwk("X25519", client.publicKey) },
+  );
+  assert.equal(ack.message.type, "https://didcomm.org/messagepickup/3.0/messages-received");
+  assert.deepEqual(ack.message.body.message_id_list, [inboundId]);
+
+  session.close();
 });
 
 test("MediatorSession: waitFor times out when no matching frame arrives", async () => {

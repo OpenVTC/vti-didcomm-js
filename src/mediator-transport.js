@@ -32,6 +32,7 @@ import * as b64u from "./base64url.js";
 import * as jwk from "./jwk.js";
 
 const LIVE_DELIVERY_CHANGE_TYPE = "https://didcomm.org/messagepickup/3.0/live-delivery-change";
+const MESSAGES_RECEIVED_TYPE = "https://didcomm.org/messagepickup/3.0/messages-received";
 
 // A second, application subprotocol offered alongside the bearer one.
 //
@@ -82,6 +83,29 @@ export function buildLiveDeliveryChange({ from, mediatorDid, live = true }) {
     // back over this same channel". It's a top-level message field.
     return_route: "all",
     body: { live_delivery: live },
+  };
+}
+
+/**
+ * Build the `messages-received` plaintext that tells the mediator we've
+ * taken delivery of the listed message ids so it deletes them from the
+ * queue and stops re-delivering them on the next (re)connection. Without
+ * this, message-pickup 3.0 keeps every un-acked message queued and a
+ * client that reconnects (e.g. an ephemeral MV3 service worker) sees the
+ * same inbound messages replayed every time.
+ */
+export function buildMessagesReceived({ from, mediatorDid, messageIds }) {
+  const now = Math.floor(Date.now() / 1000);
+  return {
+    id: `urn:uuid:${randomUuid()}`,
+    typ: "application/didcomm-plain+json",
+    type: MESSAGES_RECEIVED_TYPE,
+    from,
+    to: [mediatorDid],
+    created_time: now,
+    expires_time: now + 300,
+    return_route: "all",
+    body: { message_id_list: messageIds },
   };
 }
 
@@ -289,6 +313,11 @@ export class MediatorSession {
       // Drop it — correlation only cares about the response we await.
       return;
     }
+    // Ack delivery so the mediator deletes its queued copy and stops
+    // replaying it on the next (re)connection. Best-effort + fire-and-
+    // forget: a failed ack must never break frame processing, and we
+    // ack regardless of whether a waiter claims the message below.
+    if (result.message.id) void this._ackReceived(result.message.id);
     // Try to hand it to a matching waiter; else buffer it.
     const thid = result.message.thid ?? result.message.id;
     const idx = this._waiters.findIndex((w) => w.thid === thid);
@@ -313,6 +342,39 @@ export class MediatorSession {
           // A throwing listener must not break frame processing.
         }
       }
+    }
+  }
+
+  /**
+   * Authcrypt + send a `messages-received` ack for the given message id(s)
+   * to the mediator over the live socket. Best-effort: swallows errors so
+   * a transient pack/send failure can't break frame processing.
+   * @param {string|string[]} ids
+   */
+  async _ackReceived(ids) {
+    const messageIds = Array.isArray(ids) ? ids : [ids];
+    if (messageIds.length === 0) return;
+    try {
+      if (!this.ws || this.ws.readyState !== 1) return;
+      const ack = buildMessagesReceived({
+        from: this.client.did,
+        mediatorDid: this.mediator.did,
+        messageIds,
+      });
+      const packed = await pack({
+        message: ack,
+        sender: {
+          kid: this.client.kid,
+          privateJwk: jwk.privateJwk("X25519", this.client.privateKey, this.client.publicKey),
+        },
+        recipient: {
+          kid: this.mediator.kid,
+          publicJwk: jwk.publicJwk("X25519", this.mediator.x25519Pub),
+        },
+      });
+      this.ws.send(packed);
+    } catch {
+      // Best-effort: persistent client-side dedup is the durable guard.
     }
   }
 
