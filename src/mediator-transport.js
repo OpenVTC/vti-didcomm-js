@@ -156,8 +156,13 @@ export class MediatorSession {
    * @param {Map<string,Object>} [args.senderKeys] - seed sender keys.
    * @param {Function} [args.resolveSender] - async sender-key fallback.
    * @param {Function} [args.WebSocketImpl] - WebSocket ctor (default global).
+   * @param {(message: Object, thid: string) => void} [args.onMessage] - called
+   *   for each inbound message NOT claimed by a `waitFor` waiter (unsolicited
+   *   inbound, e.g. a server-initiated request). Fired in addition to the
+   *   internal buffering, so request/reply via `waitFor` is unaffected;
+   *   handlers should filter by the message `type`.
    */
-  constructor({ mediator, mediatorJwt, client, senderKeys, resolveSender, WebSocketImpl }) {
+  constructor({ mediator, mediatorJwt, client, senderKeys, resolveSender, WebSocketImpl, onMessage }) {
     if (!mediator?.wsEndpoint) {
       throw new Error("MediatorSession: mediator.wsEndpoint required (mediator advertises no wss endpoint)");
     }
@@ -166,6 +171,7 @@ export class MediatorSession {
     this.client = client;
     this.senderKeys = senderKeys ?? new Map();
     this.resolveSender = resolveSender;
+    this.onMessage = onMessage;
     this.WebSocketImpl = WebSocketImpl ?? globalThis.WebSocket;
     if (typeof this.WebSocketImpl !== "function") {
       throw new Error("MediatorSession: no WebSocket implementation available");
@@ -296,6 +302,17 @@ export class MediatorSession {
       // long-lived tab. Drop the oldest when over the cap.
       this._inbox.push({ thid, message: result.message });
       if (this._inbox.length > MAX_INBOX) this._inbox.shift();
+      // Surface unsolicited inbound (server-initiated requests) to a
+      // listener, if one is registered. Buffering above is preserved so a
+      // late `waitFor` for a raced reply still finds it; the listener should
+      // filter by message `type`.
+      if (this.onMessage) {
+        try {
+          this.onMessage(result.message, thid);
+        } catch {
+          // A throwing listener must not break frame processing.
+        }
+      }
     }
   }
 
