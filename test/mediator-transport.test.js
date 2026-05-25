@@ -208,7 +208,7 @@ test("buildMessagesReceived: correct type + message_id_list", () => {
   assert.deepEqual(m.to, ["did:key:zM"]);
 });
 
-test("MediatorSession: acks delivered messages so the mediator stops replaying them", async () => {
+test("MediatorSession: acks delivered messages with sha256(packed-JWE) so the mediator stops replaying them", async () => {
   const client = generateEphemeralClient();
   const vta = generateEphemeralClient();
   const mediatorKp = keypairDid();
@@ -263,10 +263,79 @@ test("MediatorSession: acks delivered messages so the mediator stops replaying t
     { publicJwk: jwk.publicJwk("X25519", client.publicKey) },
   );
   assert.equal(ack.message.type, "https://didcomm.org/messagepickup/3.0/messages-received");
-  assert.deepEqual(ack.message.body.message_id_list, [inboundId]);
+  // The mediator's queue-id is sha256(packed JWE bytes) — the inner
+  // message id is set by the original sender and is unknown to the
+  // mediator. See memory_store.rs `store_message`.
+  const expectedQueueId = await sha256HexUtf8(inboundJwe);
+  assert.deepEqual(ack.message.body.message_id_list, [expectedQueueId]);
+  // Negative assertion guards the regression — the previous
+  // implementation acked with the inner DIDComm id, which 404'd at the
+  // mediator and let the message be replayed forever.
+  assert.notDeepEqual(ack.message.body.message_id_list, [inboundId]);
 
   session.close();
 });
+
+test("MediatorSession: does NOT ack frames from the mediator itself (status / problem-report)", async () => {
+  // Acking a mediator status reply provokes another status reply
+  // (the `messages-received` handler always emits one), which is also
+  // from the mediator — so an unfiltered ack creates an infinite
+  // ack/status ping-pong over the socket. Filter by sender DID.
+  const client = generateEphemeralClient();
+  const mediatorKp = keypairDid();
+  const mediator = {
+    did: mediatorKp.did,
+    kid: mediatorKp.kid,
+    x25519Pub: mediatorKp.publicKey,
+    wsEndpoint: "wss://mediator.test/ws",
+  };
+
+  const session = new MediatorSession({
+    mediator,
+    mediatorJwt: "med.jwt.token",
+    client,
+    WebSocketImpl: FakeWebSocket,
+  });
+
+  await session.connect();
+  const ws = FakeWebSocket.last;
+  assert.equal(ws.sent.length, 1); // live-delivery-change only
+
+  // A status reply from the mediator, addressed to the client.
+  const statusJwe = await pack({
+    message: {
+      id: "urn:uuid:status-1",
+      type: "https://didcomm.org/messagepickup/3.0/status",
+      thid: "urn:uuid:req-x",
+      from: mediatorKp.did,
+      to: [client.did],
+      body: { message_count: 0, live_delivery: true },
+    },
+    sender: {
+      kid: mediatorKp.kid,
+      privateJwk: jwk.privateJwk("X25519", mediatorKp.privateKey, mediatorKp.publicKey),
+    },
+    recipient: { kid: client.kid, publicJwk: jwk.publicJwk("X25519", client.publicKey) },
+  });
+
+  ws.inject(statusJwe);
+  await new Promise((r) => setTimeout(r, 100));
+
+  // No second frame — the status was processed silently, no ack sent.
+  assert.equal(ws.sent.length, 1);
+
+  session.close();
+});
+
+// Match the mediator's `sha256::digest(message.as_bytes())` byte-for-byte:
+// lowercase hex over the UTF-8 bytes of the packed JWE text.
+async function sha256HexUtf8(text) {
+  const bytes = new TextEncoder().encode(text);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
 
 test("MediatorSession: waitFor times out when no matching frame arrives", async () => {
   const client = generateEphemeralClient();

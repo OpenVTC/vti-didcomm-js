@@ -5,6 +5,24 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-05-25
+
+### Fixed
+
+- **Mediator delete loop on `messages-received` ack.** The 0.4.0
+  ack-on-delivery feature acked queued messages with the inner DIDComm
+  message `id` (set by the original sender), but the Affinidi mediator's
+  queue-id is `sha256(packed-JWE bytes)` (see
+  `affinidi-messaging-mediator` `memory_store.rs::store_message`). Every
+  ack 404'd at the mediator (`w.m.database.message.delete.not_found`),
+  the message was never deleted, and it was replayed on every reconnect.
+  Worse, the `messages-received` handler always returns a `status` reply
+  — itself from the mediator — and the old code acked that too, which
+  provoked another status, creating an infinite ~300 ms ack/status
+  ping-pong over the live socket. Fix: ack with `sha256(raw frame
+  bytes)`, and skip frames whose sender is the mediator (status,
+  problem-report, etc. — not queued messages).
+
 ## [0.2.0] - 2026-05-21
 
 Additive release — all existing X25519 behaviour is unchanged and remains

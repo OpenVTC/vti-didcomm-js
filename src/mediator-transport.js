@@ -331,10 +331,27 @@ export class MediatorSession {
       return;
     }
     // Ack delivery so the mediator deletes its queued copy and stops
-    // replaying it on the next (re)connection. Best-effort + fire-and-
-    // forget: a failed ack must never break frame processing, and we
-    // ack regardless of whether a waiter claims the message below.
-    if (result.message.id) void this._ackReceived(result.message.id);
+    // replaying it on the next (re)connection. Two non-obvious points:
+    //
+    //   1. The mediator's queue-id is sha256(packed JWE bytes), NOT the
+    //      inner DIDComm message id (which is set by the original
+    //      sender, e.g. the VTA, and is unknown to the mediator). See
+    //      affinidi-messaging-mediator memory_store.rs `store_message`:
+    //      `let msg_id = digest(message.as_bytes());`.
+    //   2. Skip the ack when the frame is from the mediator itself
+    //      (status, problem-report, …). Those aren't queued messages,
+    //      and acking one provokes another status reply — which is
+    //      itself from the mediator, so acking THAT provokes another,
+    //      and so on (~one round-trip every ~300ms). Filtering by
+    //      sender breaks that loop.
+    //
+    // Best-effort + fire-and-forget: a failed ack must never break frame
+    // processing, and we ack regardless of whether a waiter claims the
+    // message below.
+    const senderDid = result.senderKid ? result.senderKid.split("#")[0] : null;
+    if (senderDid && senderDid !== this.mediator.did) {
+      void this._ackReceived(await sha256Hex(text));
+    }
     // Try to hand it to a matching waiter; else buffer it.
     const thid = result.message.thid ?? result.message.id;
     const idx = this._waiters.findIndex((w) => w.thid === thid);
@@ -451,4 +468,16 @@ function randomUuid() {
   b[8] = (b[8] & 0x3f) | 0x80;
   const h = Array.from(b).map((v) => v.toString(16).padStart(2, "0")).join("");
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+
+// Lowercase hex sha256 of a UTF-8 string. Matches the mediator's
+// Rust `sha256::digest(message.as_bytes())` byte-for-byte (same
+// output format and same input encoding), so the digests align as
+// the pickup queue-id on both sides.
+async function sha256Hex(text) {
+  const bytes = new TextEncoder().encode(text);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
 }
