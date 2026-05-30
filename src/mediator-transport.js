@@ -53,6 +53,53 @@ const MESSAGES_RECEIVED_TYPE = "https://didcomm.org/messagepickup/3.0/messages-r
 // to satisfy the subprotocol-echo handshake.
 const WS_APP_SUBPROTOCOL = "didcomm";
 
+// Human-readable hint for an RFC 6455 close code, oriented at the
+// failure modes a mediator client actually hits. The browser hides the
+// HTTP status of a rejected upgrade, so the close code is the only
+// machine signal distinguishing "auth/ACL reject" from "network/TLS"
+// from "proxy misconfig".
+function describeCloseCode(code) {
+  switch (code) {
+    case undefined:
+    case null:
+      return "no close code (the implementation passed no close event)";
+    case 1000:
+      return "normal closure";
+    case 1001:
+      return "endpoint going away";
+    case 1002:
+      return "protocol error — likely a subprotocol mismatch (the mediator must echo a Sec-WebSocket-Protocol)";
+    case 1005:
+      return "no status received";
+    case 1006:
+      return "abnormal closure — no close frame was sent. The HTTP upgrade was most likely refused outright (401/403/426), or a TLS/DNS/network failure occurred, or a reverse proxy is not configured to pass WebSocket upgrades on this path. If REST auth succeeds but the WS gives 1006, suspect a 401/403 on the upgrade (stale/expired bearer, or the client DID is not in the MEDIATOR's ACL — distinct from the VTA's ACL) or a proxy that strips the Upgrade header";
+    case 1008:
+      return "policy violation — the mediator rejected the connection. Re-authenticate to the mediator, and confirm the client DID is permitted by the MEDIATOR's ACL (updating the target VTA's ACL does NOT change the mediator's gate)";
+    case 1011:
+      return "mediator internal error — check mediator logs";
+    case 1015:
+      return "TLS handshake failure — certificate/SNI/protocol problem reaching the wss endpoint";
+    default:
+      if (code >= 4000) return `application-specific close code ${code} — see mediator logs`;
+      return `close code ${code}`;
+  }
+}
+
+// Decode a JWT's `exp` (seconds) without verifying the signature —
+// purely to surface a born-expired bearer in diagnostics. Returns null
+// on any malformed input (never throws).
+function decodeJwtExp(jwt) {
+  if (typeof jwt !== "string") return null;
+  const parts = jwt.split(".");
+  if (parts.length < 2) return null;
+  try {
+    const payload = JSON.parse(new TextDecoder().decode(b64u.decode(parts[1])));
+    return typeof payload.exp === "number" ? payload.exp : null;
+  } catch {
+    return null;
+  }
+}
+
 // Cap on un-awaited inbound messages held for a future `waitFor`. A
 // request/response client buffers at most a handful; this only bounds a
 // misbehaving mediator pushing unsolicited frames.
@@ -189,12 +236,16 @@ export class MediatorSession {
    *   unexpectedly (after a successful open, not via `close()`). Lets a
    *   warm-session holder evict + reconnect.
    */
-  constructor({ mediator, mediatorJwt, client, senderKeys, resolveSender, WebSocketImpl, onMessage, onClose }) {
+  constructor({ mediator, mediatorJwt, client, senderKeys, resolveSender, WebSocketImpl, onMessage, onClose, connectTimeoutMs }) {
     if (!mediator?.wsEndpoint) {
       throw new Error("MediatorSession: mediator.wsEndpoint required (mediator advertises no wss endpoint)");
     }
     this.mediator = mediator;
     this.mediatorJwt = mediatorJwt;
+    // Upper bound on the WS upgrade. Without it, a silently-dropped
+    // upgrade (proxy blackhole, no open/error/close ever fires) would
+    // hang connect() forever. 0 disables the timeout.
+    this.connectTimeoutMs = connectTimeoutMs ?? 15000;
     this.client = client;
     this.senderKeys = senderKeys ?? new Map();
     this.resolveSender = resolveSender;
@@ -254,15 +305,21 @@ export class MediatorSession {
 
   _openSocket() {
     return new Promise((resolve, reject) => {
-      // `connect()` settles exactly once: on the first of open / error /
-      // close. A strict client that rejects the 101 (e.g. no subprotocol
-      // echoed) fires `error` then `close` *before* `onopen` — without
-      // this guard the connect promise would hang forever. After open,
-      // error/close instead fail any pending waiters (see below).
+      // `connect()` settles exactly once: on the first of open / close /
+      // timeout. A strict client that rejects the 101 (e.g. no
+      // subprotocol echoed) fires `error` then `close` *before* `onopen`.
+      // We prefer to settle on `close` rather than `error`, because the
+      // browser `error` event is deliberately information-free (no code,
+      // no reason — a privacy measure) while the `close` event carries
+      // the `code`/`reason` that actually says WHY the upgrade failed.
+      // After open, error/close instead fail any pending waiters.
       let settled = false;
+      let sawError = false;
+      let timer = null;
       const settleConnect = (fn, arg) => {
         if (settled) return false;
         settled = true;
+        if (timer) clearTimeout(timer);
         fn(arg);
         return true;
       };
@@ -277,20 +334,52 @@ export class MediatorSession {
         WS_APP_SUBPROTOCOL,
       ]);
       this.ws = ws;
+
+      if (this.connectTimeoutMs > 0) {
+        timer = setTimeout(() => {
+          settleConnect(
+            reject,
+            this._connectError({
+              reason: `no open/close within ${this.connectTimeoutMs}ms`,
+              hint: "the upgrade was silently dropped — a reverse proxy or firewall not configured to pass WebSocket upgrades on this path will hang rather than reject",
+            }),
+          );
+          try {
+            ws.close();
+          } catch {
+            // best effort
+          }
+        }, this.connectTimeoutMs);
+      }
+
       ws.onopen = () => settleConnect(resolve);
       ws.onmessage = (ev) => this._onFrame(ev.data);
       ws.onerror = () => {
-        // Before open: fail the connect. After open: fail pending waiters.
-        if (settleConnect(reject, new Error("mediator-transport: WebSocket failed to open"))) {
-          return;
-        }
-        for (const w of this._waiters.splice(0)) {
-          clearTimeout(w.timer);
-          w.reject(new Error("mediator-transport: WebSocket error"));
+        // The browser `error` event carries no detail. Record that it
+        // happened and wait for the `close` event (which has the code).
+        // Only if no close follows do we settle on the bare error.
+        sawError = true;
+        if (settled) {
+          for (const w of this._waiters.splice(0)) {
+            clearTimeout(w.timer);
+            w.reject(new Error("mediator-transport: WebSocket error"));
+          }
         }
       };
-      ws.onclose = () => {
-        if (settleConnect(reject, new Error("mediator-transport: WebSocket closed before open"))) {
+      ws.onclose = (ev) => {
+        const code = ev?.code;
+        const reason = ev?.reason;
+        if (
+          settleConnect(
+            reject,
+            this._connectError({
+              code,
+              reason,
+              sawError,
+              hint: describeCloseCode(code),
+            }),
+          )
+        ) {
           return;
         }
         for (const w of this._waiters.splice(0)) {
@@ -308,6 +397,46 @@ export class MediatorSession {
         }
       };
     });
+  }
+
+  /**
+   * Build a rich, actionable error for a failed WS upgrade. The browser
+   * `error` event is detail-free, so the close `code`/`reason` plus a
+   * decoded view of the bearer token's expiry is the most we can give a
+   * caller. Structured fields (`code`, `reason`, `endpoint`) are attached
+   * so the plugin can branch/log programmatically.
+   */
+  _connectError({ code, reason, sawError, hint }) {
+    const parts = ["mediator-transport: WebSocket failed to open"];
+    if (code != null) parts.push(`(close code ${code}${reason ? ` "${reason}"` : ""})`);
+    else if (sawError) parts.push("(error before close — no code provided by the browser)");
+    if (hint) parts.push(`— ${hint}`);
+
+    // Decode the bearer token's exp so a born-expired / skewed token (a
+    // common cause of an upgrade reject that REST auth accepts) is
+    // visible without server logs.
+    const exp = decodeJwtExp(this.mediatorJwt);
+    if (exp != null) {
+      const expMs = exp * 1000;
+      const skewMs = expMs - this._nowMs();
+      if (skewMs <= 0) {
+        parts.push(
+          `— bearer token is already EXPIRED (exp ${new Date(expMs).toISOString()}, ${Math.round(-skewMs / 1000)}s ago); re-authenticate, and check client/mediator clock skew`,
+        );
+      }
+    }
+
+    const err = new Error(parts.join(" "));
+    err.code = code;
+    err.reason = reason;
+    err.endpoint = this.mediator.wsEndpoint;
+    return err;
+  }
+
+  // Wall-clock for skew reporting only (never gates logic). Isolated so
+  // it's the single Date use and easy to stub in tests.
+  _nowMs() {
+    return new Date().getTime();
   }
 
   /** Send a raw packed JWE as a WS text frame. */

@@ -364,3 +364,106 @@ test("MediatorSession: requires a wsEndpoint", () => {
     /wsEndpoint required/,
   );
 });
+
+// ── Connect-failure diagnostics ────────────────────────────────────
+//
+// A WebSocket stand-in whose upgrade FAILS: it fires `error` (detail-
+// free, like a browser) then `close` with a caller-chosen code/reason,
+// without ever firing `onopen`.
+class FailingWebSocket {
+  static code = 1006;
+  static reason = "";
+  constructor(url, protocols) {
+    this.url = url;
+    this.protocols = protocols;
+    this.onopen = null;
+    this.onmessage = null;
+    this.onerror = null;
+    this.onclose = null;
+    setTimeout(() => {
+      this.onerror && this.onerror({});
+      this.onclose && this.onclose({ code: FailingWebSocket.code, reason: FailingWebSocket.reason });
+    }, 0);
+  }
+  addEventListener() {}
+  send() {}
+  close() {}
+}
+
+function failingSession(jwt = "med.jwt.token", { connectTimeoutMs } = {}) {
+  const m = keypairDid();
+  return new MediatorSession({
+    mediator: { did: m.did, kid: m.kid, x25519Pub: m.publicKey, wsEndpoint: "wss://mediator.test/ws" },
+    mediatorJwt: jwt,
+    client: generateEphemeralClient(),
+    WebSocketImpl: FailingWebSocket,
+    connectTimeoutMs,
+  });
+}
+
+test("connect failure: 1008 surfaces the close code + mediator-ACL hint", async () => {
+  FailingWebSocket.code = 1008;
+  FailingWebSocket.reason = "unauthorized";
+  const session = failingSession();
+  await assert.rejects(
+    () => session.connect(),
+    (err) => {
+      assert.match(err.message, /close code 1008/);
+      assert.match(err.message, /unauthorized/);
+      assert.match(err.message, /MEDIATOR's ACL/);
+      assert.equal(err.code, 1008);
+      assert.equal(err.endpoint, "wss://mediator.test/ws");
+      return true;
+    },
+  );
+});
+
+test("connect failure: 1006 explains a refused/blackholed upgrade", async () => {
+  FailingWebSocket.code = 1006;
+  FailingWebSocket.reason = "";
+  const session = failingSession();
+  await assert.rejects(
+    () => session.connect(),
+    (err) => {
+      assert.match(err.message, /close code 1006/);
+      assert.match(err.message, /upgrade was most likely refused|proxy/);
+      return true;
+    },
+  );
+});
+
+test("connect failure: a born-expired bearer token is flagged", async () => {
+  FailingWebSocket.code = 1008;
+  FailingWebSocket.reason = "";
+  // JWT with exp 1h in the past (signature irrelevant — we never verify).
+  const past = Math.floor(new Date().getTime() / 1000) - 3600;
+  const b64 = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
+  const jwt = `${b64({ alg: "none" })}.${b64({ exp: past })}.sig`;
+  const session = failingSession(jwt);
+  await assert.rejects(
+    () => session.connect(),
+    (err) => {
+      assert.match(err.message, /already EXPIRED/);
+      return true;
+    },
+  );
+});
+
+test("connect failure: times out when no event ever fires", async () => {
+  // A socket that never opens, errors, or closes.
+  class SilentWebSocket {
+    constructor() {}
+    addEventListener() {}
+    send() {}
+    close() {}
+  }
+  const m = keypairDid();
+  const session = new MediatorSession({
+    mediator: { did: m.did, kid: m.kid, x25519Pub: m.publicKey, wsEndpoint: "wss://mediator.test/ws" },
+    mediatorJwt: "med.jwt.token",
+    client: generateEphemeralClient(),
+    WebSocketImpl: SilentWebSocket,
+    connectTimeoutMs: 20,
+  });
+  await assert.rejects(() => session.connect(), /silently dropped|within 20ms/);
+});
