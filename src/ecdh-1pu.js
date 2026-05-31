@@ -67,11 +67,16 @@ export async function deriveKekAuthcrypt({
   apv,
   ccTag,
   crv = "X25519",
+  legacy = false,
 }) {
   const ze = keyAgreement.sharedSecret(crv, ephemeralPrivate, recipientPublic);
   const zs = keyAgreement.sharedSecret(crv, senderPrivate, recipientPublic);
   const z = concat(ze, zs);
-  return concatKdf.deriveKey(z, { alg, apu, apv, suppPrivInfo: ccTag }, 256);
+  return concatKdf.deriveKey(
+    z,
+    { alg, apu, apv, suppPrivInfo: ccTag, legacyRawSuppPrivInfo: legacy },
+    256,
+  );
 }
 
 /**
@@ -93,6 +98,10 @@ export async function deriveKekAuthcrypt({
  * @param {Uint8Array} [args.ccTag] - JWE content-encryption auth tag
  *   for key-wrap mode binding. Same value the sender used.
  * @param {"X25519"|"P-256"} [args.crv="X25519"] - key-agreement curve
+ * @param {boolean} [args.legacy=false] - derive the KEK with the
+ *   pre-0.5 (unprefixed cc_tag) Concat KDF. Used only by the decrypt
+ *   fallback so a fixed recipient can still read authcrypt from a
+ *   not-yet-upgraded peer (see `unpack.js`).
  * @returns {Promise<Uint8Array>} 32-byte KEK
  */
 export async function recipientKekAuthcrypt({
@@ -104,11 +113,16 @@ export async function recipientKekAuthcrypt({
   apv,
   ccTag,
   crv = "X25519",
+  legacy = false,
 }) {
   const ze = keyAgreement.sharedSecret(crv, recipientPrivate, ephemeralPublic);
   const zs = keyAgreement.sharedSecret(crv, recipientPrivate, senderPublic);
   const z = concat(ze, zs);
-  return concatKdf.deriveKey(z, { alg, apu, apv, suppPrivInfo: ccTag }, 256);
+  return concatKdf.deriveKey(
+    z,
+    { alg, apu, apv, suppPrivInfo: ccTag, legacyRawSuppPrivInfo: legacy },
+    256,
+  );
 }
 
 function concat(a, b) {
