@@ -33,7 +33,10 @@ const ENC = "A256CBC-HS512";
  * @param {Object} [sender] - `{ publicJwk }` — the sender's X25519
  *   public key, required for authcrypt (ECDH-1PU), ignored for
  *   anoncrypt (ECDH-ES).
- * @returns {Promise<{ message: Object, senderKid: string|undefined, authenticated: boolean }>}
+ * @returns {Promise<{ message: Object, senderKid: string|undefined, authenticated: boolean, legacyKekUsed: boolean }>}
+ *   `legacyKekUsed` is true when an authcrypt message only decrypted
+ *   under the pre-0.5 (unprefixed cc_tag) KEK — a migration signal that
+ *   the sender hasn't upgraded yet.
  */
 export async function unpack(jweJson, recipient, sender) {
   if (typeof jweJson !== "string") {
@@ -111,7 +114,14 @@ export async function unpack(jweJson, recipient, sender) {
   const apuBytes = header.apu ? b64u.decode(header.apu) : new Uint8Array();
   const apvBytes = header.apv ? b64u.decode(header.apv) : new Uint8Array();
 
-  let kek;
+  // 5. Derive the KEK and unwrap the CEK.
+  const encryptedKey = b64u.decode(recipientEntry.encrypted_key);
+  let cek;
+  // True when decryption only succeeded under the legacy (pre-0.5,
+  // unprefixed cc_tag — issue #322) KEK, i.e. the sender is a
+  // not-yet-upgraded peer. A migration signal for callers.
+  let legacyKekUsed = false;
+
   if (isAuthcrypt) {
     // Bind the authenticated sender identity: `apu` (which is fed into
     // the KDF) must equal utf8(skid) (which selects the sender key we
@@ -131,7 +141,7 @@ export async function unpack(jweJson, recipient, sender) {
         `unpack: sender key curve (${jwk.curveOf(sender.publicJwk)}) does not match epk curve (${crv})`,
       );
     }
-    kek = await ecdh1pu.recipientKekAuthcrypt({
+    const kekArgs = {
       recipientPrivate: recipientPriv,
       ephemeralPublic,
       senderPublic: jwk.rawPublic(sender.publicJwk),
@@ -140,9 +150,29 @@ export async function unpack(jweJson, recipient, sender) {
       apv: apvBytes,
       ccTag: tag,
       crv,
-    });
+    };
+    // Try the spec-correct KEK (length-prefixed cc_tag) first. If the
+    // AES-KW integrity check fails, the sender may be a pre-0.5 peer
+    // that derived the KEK with cc_tag un-prefixed (issue #322) — retry
+    // with the legacy derivation so we stay interoperable during
+    // migration. A genuinely bad envelope fails both; the second throw
+    // propagates.
+    const kek = await ecdh1pu.recipientKekAuthcrypt(kekArgs);
+    try {
+      cek = await aes.unwrapKey(kek, encryptedKey);
+    } catch {
+      const legacyKek = await ecdh1pu.recipientKekAuthcrypt({ ...kekArgs, legacy: true });
+      try {
+        cek = await aes.unwrapKey(legacyKek, encryptedKey);
+        legacyKekUsed = true;
+      } finally {
+        legacyKek.fill(0);
+      }
+    } finally {
+      kek.fill(0);
+    }
   } else {
-    kek = await ecdhEs.recipientKekAnoncrypt({
+    const kek = await ecdhEs.recipientKekAnoncrypt({
       recipientPrivate: recipientPriv,
       ephemeralPublic,
       alg: ALG_ANONCRYPT,
@@ -150,11 +180,12 @@ export async function unpack(jweJson, recipient, sender) {
       apv: apvBytes,
       crv,
     });
+    try {
+      cek = await aes.unwrapKey(kek, encryptedKey);
+    } finally {
+      kek.fill(0);
+    }
   }
-
-  // 5. Unwrap the CEK.
-  const encryptedKey = b64u.decode(recipientEntry.encrypted_key);
-  const cek = await aes.unwrapKey(kek, encryptedKey);
 
   // 6. A256CBC-HS512 decrypt.
   let plaintext;
@@ -164,7 +195,6 @@ export async function unpack(jweJson, recipient, sender) {
     throw new Error(`unpack: A256CBC-HS512 decrypt failed: ${e.message}`);
   } finally {
     cek.fill(0);
-    kek.fill(0);
   }
 
   // 7. Parse the plaintext.
@@ -179,6 +209,7 @@ export async function unpack(jweJson, recipient, sender) {
     message,
     senderKid: isAuthcrypt ? header.skid : undefined,
     authenticated: isAuthcrypt,
+    legacyKekUsed,
   };
 }
 

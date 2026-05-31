@@ -88,6 +88,29 @@ test("deriveKey is deterministic across calls", async () => {
   assert.deepEqual(a, b);
 });
 
+test("ECDH-1PU cc_tag (suppPrivInfo) is length-prefixed by default (#322)", async () => {
+  const z = new Uint8Array(32).fill(7);
+  const apu = new TextEncoder().encode("a");
+  const apv = new TextEncoder().encode("b");
+  const tag = new Uint8Array(32).fill(0xcc);
+  const opts = { alg: "ECDH-1PU+A256KW", apu, apv };
+
+  // Default appends `uint32_be(len) || tag`. Equivalent to feeding the
+  // raw path a tag that's already length-prefixed.
+  const prefixed = await deriveKey(z, { ...opts, suppPrivInfo: tag }, 256);
+  const manual = await deriveKey(
+    z,
+    { ...opts, suppPrivInfo: lengthPrefix(tag), legacyRawSuppPrivInfo: true },
+    256,
+  );
+  assert.deepEqual(prefixed, manual, "default suppPrivInfo must be length-prefixed");
+
+  // The legacy (pre-0.5) raw form must differ — that 4-byte difference
+  // is exactly the interop bug #322.
+  const raw = await deriveKey(z, { ...opts, suppPrivInfo: tag, legacyRawSuppPrivInfo: true }, 256);
+  assert.notDeepEqual(prefixed, raw, "length-prefixed vs raw cc_tag must differ");
+});
+
 test("deriveKey distinguishes apu vs apv (no symmetry bug)", async () => {
   const z = new Uint8Array(32).fill(1);
   const x = new TextEncoder().encode("X");

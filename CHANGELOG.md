@@ -5,6 +5,41 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-06-01
+
+### Fixed
+
+- **ECDH-1PU Concat KDF: length-prefix the content-encryption tag**
+  (interop; tracked as #322 in affinidi-messaging-didcomm). `cc_tag` was
+  fed into the Concat KDF as SuppPrivInfo **raw**, without the 32-bit
+  big-endian length prefix every other OtherInfo field carries. This
+  matched the then-buggy `affinidi-messaging-didcomm` (the
+  `roundtrip-rust` vectors were generated against it), so JS↔Rust
+  authcrypt worked *because both were wrong* — but neither interoperated
+  with credo-ts / didcomm-python. The tag is now length-prefixed per the
+  ECDH-1PU draft (Appendix B), making `ECDH-1PU+A256KW` authcrypt
+  spec-correct. Affects X25519 and P-256; anoncrypt (ECDH-ES) was never
+  affected.
+
+### Added
+
+- **Dual-KEK decrypt fallback.** `unpack` derives the spec-correct KEK
+  first and, if AES-KW unwrap fails, retries with the legacy (pre-0.5,
+  unprefixed-tag) KEK — so an upgraded recipient still reads authcrypt
+  from a not-yet-upgraded peer during migration. The result now carries
+  `legacyKekUsed` (true when the legacy KEK was used) as a migration
+  signal.
+
+### Migration
+
+This is a **breaking authcrypt wire change**: a 0.5 sender's authcrypt
+cannot be decrypted by an un-upgraded ≤ 0.4.x recipient. **Upgrade
+recipients before senders** — the dual-KEK fallback makes upgraded
+recipients accept both old and new senders. Pair with
+`affinidi-messaging-didcomm` ≥ 0.14 (the matching Rust fix). The
+`roundtrip-rust` interop vectors should be regenerated against a Rust
+helper built from didcomm ≥ 0.14.
+
 ## [0.4.2] - 2026-05-30
 
 ### Added

@@ -22,9 +22,16 @@
 // SuppPrivInfo is normally omitted, but for ECDH-1PU in
 // Key-Agreement-with-Key-Wrap mode (draft-madden-jose-ecdh-1pu §2.3)
 // it carries the JWE content-encryption auth tag (`cc_tag`),
-// appended RAW (no length prefix — that's the convention shared by
-// affinidi-messaging-didcomm, go-jose, jwx). This binds the KEK
-// derivation to the ciphertext.
+// **length-prefixed** like every other variable-length OtherInfo
+// field (`uint32_be(len) || tag`) per the draft's Appendix B test
+// vector. This binds the KEK derivation to the ciphertext.
+//
+// NOTE: versions ≤ 0.4.x appended `cc_tag` RAW (no length prefix),
+// matching the then-buggy affinidi-messaging-didcomm. That was
+// non-spec and only interoperated with other equally-buggy peers, not
+// credo-ts / didcomm-python (affinidi-messaging-didcomm fixed it in
+// 0.14). `legacyRawSuppPrivInfo` reproduces the old derivation for the
+// decrypt fallback during migration — see `unpack.js`.
 //
 // We only support SHA-256 + JOSE OtherInfo construction — the
 // specific shape ECDH-1PU+A256KW needs. A general Concat KDF would
@@ -48,15 +55,24 @@ const HASH_LEN = 32; // SHA-256 output length
  *   (NOT base64url). The caller is responsible for base64url-decoding
  *   the `apu` header value before passing it here. Empty allowed.
  * @param {Uint8Array} otherInfo.apv - Same shape as `apu`.
- * @param {Uint8Array} [otherInfo.suppPrivInfo] - Optional raw bytes
- *   appended after SuppPubInfo (NOT length-prefixed). Used by
+ * @param {Uint8Array} [otherInfo.suppPrivInfo] - Optional bytes
+ *   appended after SuppPubInfo, length-prefixed (`uint32_be(len) ||
+ *   bytes`) like the other variable-length fields. Used by
  *   ECDH-1PU+A256KW to carry the JWE content-encryption auth tag.
+ * @param {boolean} [otherInfo.legacyRawSuppPrivInfo=false] - When true,
+ *   append `suppPrivInfo` RAW (no length prefix), reproducing the
+ *   pre-0.5 (non-spec) derivation. For the decrypt migration fallback
+ *   only; never use when packing.
  * @param {number} keyDataLenBits - Number of bits of derived
  *   keying material to produce. Must be a multiple of 8 and ≤ 4096
  *   (defensive cap to catch order-of-magnitude bugs).
  * @returns {Promise<Uint8Array>}
  */
-export async function deriveKey(z, { alg, apu, apv, suppPrivInfo }, keyDataLenBits) {
+export async function deriveKey(
+  z,
+  { alg, apu, apv, suppPrivInfo, legacyRawSuppPrivInfo = false },
+  keyDataLenBits,
+) {
   if (!(z instanceof Uint8Array)) {
     throw new TypeError("ConcatKDF: Z must be Uint8Array");
   }
@@ -82,12 +98,20 @@ export async function deriveKey(z, { alg, apu, apv, suppPrivInfo }, keyDataLenBi
   const keyDataLenBytes = keyDataLenBits / 8;
 
   const algBytes = new TextEncoder().encode(alg);
+  // SuppPrivInfo (the ECDH-1PU cc_tag) is length-prefixed like every
+  // other variable-length field. `legacyRawSuppPrivInfo` reproduces the
+  // pre-0.5 unprefixed form for the decrypt migration fallback only.
+  const supp = suppPrivInfo
+    ? legacyRawSuppPrivInfo
+      ? suppPrivInfo
+      : lengthPrefix(suppPrivInfo)
+    : new Uint8Array();
   const otherInfo = concatenate(
     lengthPrefix(algBytes),
     lengthPrefix(apu),
     lengthPrefix(apv),
     uint32be(keyDataLenBits),
-    suppPrivInfo ?? new Uint8Array(),
+    supp,
   );
 
   const reps = Math.ceil(keyDataLenBytes / HASH_LEN);
