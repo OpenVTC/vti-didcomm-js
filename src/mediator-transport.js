@@ -85,6 +85,15 @@ function describeCloseCode(code) {
   }
 }
 
+// Default per-frame error sink: warn to the console if one is available,
+// otherwise stay silent. Overridable via the `onError` constructor option
+// (pass `() => {}` to silence, or a logger to capture).
+function defaultOnError(err) {
+  if (typeof console !== "undefined" && typeof console.warn === "function") {
+    console.warn(err?.message ?? err);
+  }
+}
+
 // Decode a JWT's `exp` (seconds) without verifying the signature —
 // purely to surface a born-expired bearer in diagnostics. Returns null
 // on any malformed input (never throws).
@@ -236,7 +245,7 @@ export class MediatorSession {
    *   unexpectedly (after a successful open, not via `close()`). Lets a
    *   warm-session holder evict + reconnect.
    */
-  constructor({ mediator, mediatorJwt, client, senderKeys, resolveSender, WebSocketImpl, onMessage, onClose, connectTimeoutMs }) {
+  constructor({ mediator, mediatorJwt, client, senderKeys, resolveSender, WebSocketImpl, onMessage, onClose, onError, connectTimeoutMs }) {
     if (!mediator?.wsEndpoint) {
       throw new Error("MediatorSession: mediator.wsEndpoint required (mediator advertises no wss endpoint)");
     }
@@ -254,6 +263,11 @@ export class MediatorSession {
     // open, not via close()). Lets a caller holding a warm session evict +
     // reconnect. Not fired on an intentional close().
     this.onClose = onClose;
+    // Per-frame error sink. A single un-unpackable / malformed inbound
+    // message must never get stuck or silently vanish: it's logged here
+    // and processing moves on to the next frame. Defaults to console.warn;
+    // pass a no-op to silence, or your own logger to capture.
+    this.onError = onError ?? defaultOnError;
     this._userClosed = false;
     this.WebSocketImpl = WebSocketImpl ?? globalThis.WebSocket;
     if (typeof this.WebSocketImpl !== "function") {
@@ -439,6 +453,23 @@ export class MediatorSession {
     return new Date().getTime();
   }
 
+  // Report a per-frame failure without throwing. Includes a short, stable
+  // fingerprint of the offending frame (first 12 chars of its content) so
+  // a recurring poison message is recognizable across redeliveries in
+  // logs, without dumping the full (possibly sensitive) ciphertext.
+  _reportFrameError(stage, err, text) {
+    const fp = typeof text === "string" ? `${text.slice(0, 12)}…(${text.length}b)` : "n/a";
+    try {
+      this.onError(new Error(`mediator-transport: failed to ${stage} [frame ${fp}]: ${err?.message ?? err}`), {
+        stage,
+        cause: err,
+        frameFingerprint: fp,
+      });
+    } catch {
+      // The error sink itself must never break the receive loop.
+    }
+  }
+
   /** Send a raw packed JWE as a WS text frame. */
   send(jweString) {
     if (!this.ws) throw new Error("mediator-transport: not connected");
@@ -446,7 +477,19 @@ export class MediatorSession {
   }
 
   async _onFrame(data) {
-    const text = typeof data === "string" ? data : new TextDecoder().decode(data);
+    // Every inbound frame is processed independently and defensively: a
+    // single bad message (undecryptable, malformed, unknown sender, or a
+    // throw anywhere in dispatch) is logged via `onError` and skipped, so
+    // the session never gets stuck on one poison message and keeps
+    // delivering the rest of the queue.
+    let text;
+    try {
+      text = typeof data === "string" ? data : new TextDecoder().decode(data);
+    } catch (err) {
+      this._reportFrameError("decode inbound frame bytes", err, null);
+      return;
+    }
+
     let result;
     try {
       result = await unpackInbound(text, {
@@ -454,11 +497,24 @@ export class MediatorSession {
         senderKeys: this.senderKeys,
         resolveSender: this.resolveSender,
       });
-    } catch {
-      // Unrelated / unparseable frame (e.g. a sender we don't know).
-      // Drop it — correlation only cares about the response we await.
+    } catch (err) {
+      // Unparseable / undecryptable / unknown-sender frame. Log (so a
+      // recurring poison message is visible rather than silently dropped)
+      // and move on — correlation only cares about responses we await.
+      this._reportFrameError("unpack inbound frame", err, text);
       return;
     }
+
+    try {
+      await this._dispatchFrame(result, text);
+    } catch (err) {
+      // A malformed-but-decryptable message (bad thid/id, throwing
+      // listener, ack failure that escaped) must not break the loop.
+      this._reportFrameError("dispatch inbound message", err, text);
+    }
+  }
+
+  async _dispatchFrame(result, text) {
     // Ack delivery so the mediator deletes its queued copy and stops
     // replaying it on the next (re)connection. Two non-obvious points:
     //

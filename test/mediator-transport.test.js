@@ -467,3 +467,48 @@ test("connect failure: times out when no event ever fires", async () => {
   });
   await assert.rejects(() => session.connect(), /silently dropped|within 20ms/);
 });
+
+// ── Inbound resilience: a bad frame must not stick the loop ─────────
+test("inbound: a poison frame is logged via onError and the next good frame still resolves", async () => {
+  const client = generateEphemeralClient();
+  const vta = generateEphemeralClient();
+  const mediatorKp = keypairDid();
+  const mediator = {
+    did: mediatorKp.did,
+    kid: mediatorKp.kid,
+    x25519Pub: mediatorKp.publicKey,
+    wsEndpoint: "wss://mediator.test/ws",
+  };
+
+  const errors = [];
+  const session = new MediatorSession({
+    mediator,
+    mediatorJwt: "med.jwt.token",
+    client,
+    senderKeys: new Map([[vta.did, { publicJwk: jwk.publicJwk("X25519", vta.publicKey) }]]),
+    WebSocketImpl: FakeWebSocket,
+    onError: (err) => errors.push(err),
+  });
+  await session.connect();
+  const ws = FakeWebSocket.last;
+
+  const reqId = "urn:uuid:after-poison";
+  const waiting = session.waitFor(reqId, 1000);
+
+  // 1) A poison frame: not even valid JSON. Must be logged, not thrown.
+  ws.inject("}{ this is not a JWE");
+  // 2) A second poison frame: valid JSON but undecryptable by us.
+  ws.inject(JSON.stringify({ protected: "x", ciphertext: "y", tag: "z" }));
+  // 3) A good frame from the VTA with the awaited thid — must still resolve.
+  const good = await pack({
+    message: { id: "urn:uuid:resp", type: "t", from: vta.did, to: [client.did], thid: reqId, body: { ok: true } },
+    sender: { kid: vta.kid, privateJwk: jwk.privateJwk("X25519", vta.privateKey, vta.publicKey) },
+    recipient: { kid: client.kid, publicJwk: jwk.publicJwk("X25519", client.publicKey) },
+  });
+  ws.inject(good);
+
+  const msg = await waiting;
+  assert.equal(msg.body.ok, true, "the good frame after two poison frames still resolves");
+  assert.ok(errors.length >= 2, `both poison frames were logged (got ${errors.length})`);
+  assert.match(errors[0].message, /failed to (unpack|dispatch) inbound/);
+});

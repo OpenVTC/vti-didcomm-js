@@ -5,6 +5,29 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] - 2026-05-30
+
+### Added
+
+- **Actionable diagnostics for failed mediator WebSocket upgrades.** A
+  failed upgrade previously collapsed into one opaque "WebSocket failed
+  to open". The browser `error` event carries no detail, so the handler
+  now settles on the `close` event and maps the RFC 6455 close code to a
+  cause — `1008` → mediator auth/ACL reject (distinct from the target
+  VTA's ACL), `1006` → refused upgrade / TLS / a proxy not passing the
+  `Upgrade` header (a CORS-blocked cross-origin upgrade also surfaces
+  here), `1015` → TLS failure. The bearer token's `exp` is decoded to
+  flag a born-expired / clock-skewed token, and the error carries
+  structured `code` / `reason` / `endpoint` fields. Adds a
+  `connectTimeoutMs` (default 15s) so a silently-dropped upgrade fails
+  fast instead of hanging.
+- **Per-frame inbound resilience.** A single bad inbound message
+  (undecryptable, malformed, unknown sender, or a throw in dispatch) is
+  now logged via a new `onError` hook (default `console.warn`) and
+  skipped, so the session never gets stuck on one poison message and
+  keeps delivering the rest of the queue. Previously such frames were
+  silently dropped.
+
 ## [0.4.1] - 2026-05-25
 
 ### Fixed
