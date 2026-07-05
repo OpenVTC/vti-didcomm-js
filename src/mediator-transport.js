@@ -241,11 +241,15 @@ export class MediatorSession {
    *   inbound, e.g. a server-initiated request). Fired in addition to the
    *   internal buffering, so request/reply via `waitFor` is unaffected;
    *   handlers should filter by the message `type`.
+   * @param {(bytes: Uint8Array) => void} [args.onTspFrame] - called for each
+   *   inbound TSP frame the mediator multiplexes onto this socket (raw qb2
+   *   bytes, first byte 0xF8). Without it, TSP frames are dropped rather than
+   *   run through the DIDComm unpacker (which can't read them).
    * @param {() => void} [args.onClose] - called once if the socket drops
    *   unexpectedly (after a successful open, not via `close()`). Lets a
    *   warm-session holder evict + reconnect.
    */
-  constructor({ mediator, mediatorJwt, client, senderKeys, resolveSender, WebSocketImpl, onMessage, onClose, onError, connectTimeoutMs }) {
+  constructor({ mediator, mediatorJwt, client, senderKeys, resolveSender, WebSocketImpl, onMessage, onTspFrame, onClose, onError, connectTimeoutMs }) {
     if (!mediator?.wsEndpoint) {
       throw new Error("MediatorSession: mediator.wsEndpoint required (mediator advertises no wss endpoint)");
     }
@@ -259,6 +263,12 @@ export class MediatorSession {
     this.senderKeys = senderKeys ?? new Map();
     this.resolveSender = resolveSender;
     this.onMessage = onMessage;
+    // Fired for each inbound TSP frame (a non-DIDComm message the mediator
+    // multiplexes onto this same socket — CESR qb2, first byte 0xF8, delivered
+    // as base64url(qb2) text). Receives the raw qb2 bytes; a TSP consumer
+    // unpacks them. Without a handler, TSP frames are dropped (not run through
+    // the DIDComm unpacker, which can't read them).
+    this.onTspFrame = onTspFrame;
     // Fired once when the socket drops *unexpectedly* (after a successful
     // open, not via close()). Lets a caller holding a warm session evict +
     // reconnect. Not fired on an intentional close().
@@ -476,6 +486,17 @@ export class MediatorSession {
     this.ws.send(jweString);
   }
 
+  /**
+   * Send a raw TSP message as a WS binary frame. The mediator sniffs the
+   * leading 0xF8 magic byte and routes it to its TSP inbound handler (the same
+   * socket carries DIDComm text frames and TSP binary frames).
+   * @param {Uint8Array} bytes
+   */
+  sendBinary(bytes) {
+    if (!this.ws) throw new Error("mediator-transport: not connected");
+    this.ws.send(bytes);
+  }
+
   async _onFrame(data) {
     // Every inbound frame is processed independently and defensively: a
     // single bad message (undecryptable, malformed, unknown sender, or a
@@ -487,6 +508,30 @@ export class MediatorSession {
       text = typeof data === "string" ? data : new TextDecoder().decode(data);
     } catch (err) {
       this._reportFrameError("decode inbound frame bytes", err, null);
+      return;
+    }
+
+    // TSP demux: the mediator multiplexes TSP messages onto this same socket.
+    // A stored TSP message is delivered as base64url(qb2) text, which starts
+    // with "-E" (the CESR `-E` count code, whose first decoded byte is the
+    // 0xF8 TSP magic). DIDComm frames are JSON (`{`) or compact JWS (`ey…`), so
+    // a leading "-E" is an unambiguous TSP marker. Route the raw qb2 bytes to
+    // the TSP consumer instead of the DIDComm unpacker (which throws on them).
+    if (text.startsWith("-E")) {
+      let qb2;
+      try {
+        qb2 = b64u.decode(text);
+      } catch (err) {
+        this._reportFrameError("decode inbound TSP frame", err, text);
+        return;
+      }
+      if (this.onTspFrame) {
+        try {
+          this.onTspFrame(qb2);
+        } catch (err) {
+          this._reportFrameError("dispatch inbound TSP frame", err, text);
+        }
+      }
       return;
     }
 
