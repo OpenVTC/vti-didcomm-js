@@ -14,6 +14,7 @@ import { generateEphemeralClient } from "../src/vta-rest-auth.js";
 import * as x25519 from "../src/x25519.js";
 import * as multibase from "../src/multibase.js";
 import * as jwk from "../src/jwk.js";
+import * as base64url from "../src/base64url.js";
 
 function keypairDid() {
   const kp = x25519.generateKeyPair();
@@ -511,4 +512,51 @@ test("inbound: a poison frame is logged via onError and the next good frame stil
   assert.equal(msg.body.ok, true, "the good frame after two poison frames still resolves");
   assert.ok(errors.length >= 2, `both poison frames were logged (got ${errors.length})`);
   assert.match(errors[0].message, /failed to (unpack|dispatch) inbound/);
+});
+
+// ── TSP demux (single-socket multiplexing) ─────────────────────────────────
+
+function tspSession(onTspFrame, onError) {
+  return new MediatorSession({
+    mediator: { wsEndpoint: "wss://m/ws", did: "did:key:zM", kid: "did:key:zM#zM", x25519Pub: new Uint8Array(32) },
+    mediatorJwt: "jwt",
+    client: { did: "did:key:zC", kid: "did:key:zC#zC", privateKey: new Uint8Array(32), publicKey: new Uint8Array(32) },
+    WebSocketImpl: FakeWebSocket,
+    onTspFrame,
+    onError,
+  });
+}
+
+test("_onFrame routes a '-E' TSP frame (base64url qb2) to onTspFrame as raw bytes", async () => {
+  const frames = [];
+  const session = tspSession((bytes) => frames.push(bytes));
+  // qb2 whose first byte is the 0xF8 TSP magic; base64url of it starts with "-E".
+  const qb2 = new Uint8Array([0xf8, 0x41, 0x42, 0x43, 0x44, 0x45]);
+  const text = base64url.encode(qb2);
+  assert.ok(text.startsWith("-E"), `expected "-E" prefix, got "${text.slice(0, 4)}"`);
+  await session._onFrame(text);
+  assert.equal(frames.length, 1);
+  assert.deepEqual(frames[0], qb2);
+});
+
+test("_onFrame does NOT route a DIDComm (JSON) frame to onTspFrame", async () => {
+  const frames = [];
+  const errors = [];
+  const session = tspSession((bytes) => frames.push(bytes), (e) => errors.push(e));
+  // A JSON DIDComm frame — must go to the DIDComm unpack path (which fails here
+  // with no skid), never to the TSP consumer.
+  await session._onFrame(JSON.stringify({ protected: "x", ciphertext: "y" }));
+  assert.equal(frames.length, 0, "TSP consumer must not see a DIDComm frame");
+});
+
+test("a TSP frame with no onTspFrame handler is dropped (not run through DIDComm unpack)", async () => {
+  const errors = [];
+  const session = tspSession(undefined, (e) => errors.push(e));
+  // A realistic TSP frame: 0xF8 0x4X → base64url "-E…" (the CESR `-E` count code).
+  const qb2 = new Uint8Array([0xf8, 0x41, 1, 2, 3]);
+  const text = base64url.encode(qb2);
+  assert.ok(text.startsWith("-E"));
+  await session._onFrame(text);
+  // No handler → silently dropped; must NOT be reported as a DIDComm unpack error.
+  assert.equal(errors.length, 0);
 });
