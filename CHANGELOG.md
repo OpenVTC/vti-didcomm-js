@@ -5,6 +5,24 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Round-trip Rust helper realigned to `affinidi-messaging-didcomm` 0.15
+  (test tooling; unblocks CI).** The `roundtrip-rust` interop vectors — the
+  JS-pack → Rust-unpack wire-compatibility check — had been failing in CI since
+  the 0.5.0 ECDH-1PU cc_tag length-prefix fix (#322): JS pack became
+  spec-correct while `tools/roundtrip-helper` still pinned the pre-fix
+  `affinidi-messaging-didcomm 0.13`, whose legacy (unprefixed) Concat-KDF KEK
+  could no longer unwrap JS's authcrypt (`key unwrap integrity check failed`).
+  The helper's 0.13-vs-JS-0.5.0 mismatch — not any wallet code — was the red.
+  Bumped the helper to 0.15 (matching the VTA + mediator) and moved the
+  key-agreement imports to their new home
+  (`affinidi_crypto::jose::key_agreement`); the vectors pass again, so JS↔Rust
+  authcrypt is a true compatibility check once more. No shipped-package change
+  (helper is `publish = false`, test-only), hence no version bump.
+
 ## [0.5.0] - 2026-06-01
 
 ### Fixed

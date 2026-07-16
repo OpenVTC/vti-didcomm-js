@@ -30,10 +30,8 @@
 
 use std::io::{self, Read, Write};
 
-use affinidi_messaging_didcomm::{
-    crypto::key_agreement::{Curve, PrivateKeyAgreement, PublicKeyAgreement},
-    message::unpack::{UnpackResult, unpack},
-};
+use affinidi_crypto::jose::key_agreement::{Curve, PrivateKeyAgreement, PublicKeyAgreement};
+use affinidi_messaging_didcomm::message::unpack::{UnpackResult, unpack};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::Deserialize;
@@ -137,6 +135,14 @@ fn run() -> Result<String, String> {
             authenticated,
             sender_kid,
             recipient_kid,
+            // 0.15 additions. `legacy_kek_used` reports whether the
+            // pre-#322 (unprefixed cc_tag) KEK was needed to unwrap — it
+            // should be `false` for a JS ≥0.5.0 spec-correct pack, which is
+            // exactly the interop this harness checks. The rest are only
+            // meaningful for signed/nested envelopes we don't emit here.
+            legacy_kek_used,
+            non_repudiation: _,
+            signer_kid: _,
         }) => {
             let plaintext = message_to_json(&message)?;
             json!({
@@ -146,6 +152,7 @@ fn run() -> Result<String, String> {
                 "authenticated": authenticated,
                 "sender_kid": sender_kid,
                 "recipient_kid": recipient_kid,
+                "legacy_kek_used": legacy_kek_used,
             })
         }
         Ok(UnpackResult::Signed {
@@ -168,6 +175,13 @@ fn run() -> Result<String, String> {
                 "plaintext": plaintext,
             })
         }
+        // `UnpackResult` is `#[non_exhaustive]`; a future variant this
+        // test helper doesn't model surfaces as a structured error rather
+        // than a build break.
+        Ok(_) => json!({
+            "ok": false,
+            "error": "unpack produced an unsupported UnpackResult variant",
+        }),
         Err(e) => json!({
             "ok": false,
             "error": e.to_string(),
