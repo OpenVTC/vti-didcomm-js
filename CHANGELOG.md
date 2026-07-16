@@ -23,6 +23,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   authcrypt is a true compatibility check once more. No shipped-package change
   (helper is `publish = false`, test-only), hence no version bump.
 
+## [0.6.1] - 2026-07-16
+
+### Fixed
+
+- **REST auth (`vta-rest-auth.js`) realigned to the current VTA wire
+  contract (D8-F2).** The library sent the removed legacy DIDComm message
+  types `https://affinidi.com/atm/1.0/authenticate[/refresh]` (the VTA now
+  rejects them with "unexpected message type") and parsed response envelopes
+  the VTA stopped emitting months ago (`{ sessionId, data: { challenge } }`
+  and `{ data: { accessToken, … } }`) — so REST authentication via this
+  library could not succeed against a current VTA at all. Now:
+  - sends the canonical `https://trusttasks.org/spec/auth/authenticate/0.1`
+    and `https://trusttasks.org/spec/auth/refresh/0.1` types;
+  - parses the flat `ChallengeResponse` (`{ challenge, sessionId, expiresAt }`,
+    no `data` envelope);
+  - parses the canonical `AuthenticateResponse` (`{ session, tokens }`), where
+    `tokens` carries OAuth-style **relative** lifetimes (`expiresIn`,
+    `refreshExpiresIn`); the library converts these to absolute Unix-second
+    `accessExpiresAt` / `refreshExpiresAt` against `session.issuedAt`, so the
+    public `authenticate()` / `refresh()` return contract is unchanged.
+
+  The challenge request still sends `{ did }` (accepted by the current VTA as a
+  one-release deserialize alias of the canonical `subject`). No public API
+  change; the `package-lock.json` `version` field (long stale at 0.2.0) is also
+  corrected.
+
 ## [0.5.0] - 2026-06-01
 
 ### Fixed
