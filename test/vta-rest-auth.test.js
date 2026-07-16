@@ -88,17 +88,33 @@ test("authenticate: full challenge-response flow", async () => {
   const vta = buildFakeVta();
   const client = generateEphemeralClient();
 
+  // Flat `ChallengeResponse` — no `data` envelope.
   const challengeBody = {
+    challenge: "deadbeefcafe",
     sessionId: "sess-abc123",
-    data: { challenge: "deadbeefcafe" },
+    expiresAt: "2027-01-15T00:01:00Z",
   };
+  // Canonical `{ session, tokens }` (`AuthenticateResponse`) with RELATIVE
+  // token lifetimes; the library converts them to absolute epochs against
+  // `session.issuedAt`.
+  const issuedAt = "2027-01-15T00:00:00Z";
+  const issuedAtEpoch = Math.floor(Date.parse(issuedAt) / 1000);
   const authBody = {
-    sessionId: "sess-abc123",
-    data: {
+    session: {
+      id: "sess-abc123",
+      subject: "did:example:client",
+      issuedAt,
+      expiresAt: "2027-01-15T00:15:00Z",
+      amr: ["did"],
+      acr: "aal1",
+    },
+    tokens: {
       accessToken: "test.jwt.token",
-      accessExpiresAt: 1_800_000_000,
       refreshToken: "refresh-xyz",
-      refreshExpiresAt: 1_800_086_400,
+      tokenType: "Bearer",
+      expiresIn: 900,
+      refreshExpiresIn: 86_400,
+      scope: [],
     },
   };
 
@@ -121,10 +137,11 @@ test("authenticate: full challenge-response flow", async () => {
     fetch,
   });
 
-  // Result shape
+  // Result shape — relative lifetimes resolved to absolute epochs.
   assert.equal(result.accessToken, "test.jwt.token");
-  assert.equal(result.accessExpiresAt, 1_800_000_000);
+  assert.equal(result.accessExpiresAt, issuedAtEpoch + 900);
   assert.equal(result.refreshToken, "refresh-xyz");
+  assert.equal(result.refreshExpiresAt, issuedAtEpoch + 86_400);
   assert.equal(result.sessionId, "sess-abc123");
 
   // Wire-format checks
@@ -158,15 +175,16 @@ test("authenticate: packed message has correct DIDComm fields", async () => {
   const vta = buildFakeVta();
   const client = generateEphemeralClient();
   const challengeBody = {
+    challenge: "abc123def456",
     sessionId: "sess-xyz",
-    data: { challenge: "abc123def456" },
+    expiresAt: "2027-01-15T00:01:00Z",
   };
 
   let capturedJwe = null;
   const { fetch } = mockFetch({
     baseUrl: "https://vta.test",
     challengeBody,
-    authBody: { data: { accessToken: "ok", accessExpiresAt: 1 } },
+    authBody: { session: { id: "sess-xyz" }, tokens: { accessToken: "ok" } },
     onAuth: (b) => (capturedJwe = b),
   });
 
@@ -192,7 +210,7 @@ test("authenticate: packed message has correct DIDComm fields", async () => {
   // The helper emits `plaintext` as a JSON value (object), already
   // decoded — no double-parse needed.
   const plaintext = unpackResult.plaintext;
-  assert.equal(plaintext.type, "https://affinidi.com/atm/1.0/authenticate");
+  assert.equal(plaintext.type, "https://trusttasks.org/spec/auth/authenticate/0.1");
   assert.equal(plaintext.from, client.did);
   assert.deepEqual(plaintext.to, [vta.did]);
   assert.equal(plaintext.body.challenge, "abc123def456");
@@ -206,13 +224,24 @@ test("refresh: exchanges a refresh token for a new pair (no challenge call)", as
   const vta = buildFakeVta();
   const client = generateEphemeralClient();
 
+  const issuedAt = "2027-01-15T00:05:00Z";
+  const issuedAtEpoch = Math.floor(Date.parse(issuedAt) / 1000);
   const refreshBody = {
-    sessionId: "sess-abc123",
-    data: {
+    session: {
+      id: "sess-abc123",
+      subject: "did:example:client",
+      issuedAt,
+      expiresAt: "2027-01-15T00:20:00Z",
+      amr: ["did"],
+      acr: "aal1",
+    },
+    tokens: {
       accessToken: "new.access.jwt",
-      accessExpiresAt: 1_800_000_900,
       refreshToken: "rotated-refresh",
-      refreshExpiresAt: 1_800_086_400,
+      tokenType: "Bearer",
+      expiresIn: 900,
+      refreshExpiresIn: 86_400,
+      scope: [],
     },
   };
 
@@ -236,7 +265,7 @@ test("refresh: exchanges a refresh token for a new pair (no challenge call)", as
   // Rotation: caller gets the NEW refresh token back.
   assert.equal(result.accessToken, "new.access.jwt");
   assert.equal(result.refreshToken, "rotated-refresh");
-  assert.equal(result.refreshExpiresAt, 1_800_086_400);
+  assert.equal(result.refreshExpiresAt, issuedAtEpoch + 86_400);
 
   // Refresh hits ONLY /auth/refresh — no /auth/challenge round-trip.
   assert.equal(calls.length, 1);
@@ -265,7 +294,7 @@ test("refresh: packed message carries the refresh_token + correct type", async (
   let capturedJwe = null;
   const { fetch } = mockRefreshFetch({
     baseUrl: "https://vta.test",
-    refreshBody: { data: { accessToken: "ok", accessExpiresAt: 1 } },
+    refreshBody: { session: { id: "s" }, tokens: { accessToken: "ok" } },
     onRefresh: (b) => (capturedJwe = b),
   });
 
@@ -288,7 +317,7 @@ test("refresh: packed message carries the refresh_token + correct type", async (
 
   assert.ok(unpackResult.ok, `unpack failed: ${JSON.stringify(unpackResult)}`);
   const plaintext = unpackResult.plaintext;
-  assert.equal(plaintext.type, "https://affinidi.com/atm/1.0/authenticate/refresh");
+  assert.equal(plaintext.type, "https://trusttasks.org/spec/auth/refresh/0.1");
   assert.equal(plaintext.body.refresh_token, "the-refresh-token");
   assert.deepEqual(plaintext.to, [vta.did]);
 });
@@ -380,8 +409,9 @@ test("authenticate: rejects when VTA DID has no keyAgreement", async () => {
   const fetch = async (url) => {
     if (url.endsWith("/auth/challenge")) {
       return new Response(JSON.stringify({
+        challenge: "c",
         sessionId: "s",
-        data: { challenge: "c" },
+        expiresAt: "2027-01-15T00:01:00Z",
       }), { status: 200 });
     }
     return new Response("ok", { status: 200 });

@@ -4,23 +4,28 @@
 // with the algorithm pair the VTA's `affinidi-messaging-didcomm-0.13`
 // decrypt path actually accepts: ECDH-1PU+A256KW + A256CBC-HS512):
 //
-//   1. POST /auth/challenge with `{ did: <client_did> }` → JSON
-//      `{ sessionId, data: { challenge, teeAttestation? } }`.
+//   1. POST /auth/challenge with `{ did: <client_did> }` → flat JSON
+//      `{ challenge, sessionId, expiresAt, teeAttestation? }`
+//      (the VTA's canonical `ChallengeResponse`; no `data` envelope).
 //   2. Build a DIDComm v2 plaintext message:
 //        { id, typ: "application/didcomm-plain+json",
-//          type: "https://affinidi.com/atm/1.0/authenticate",
+//          type: "https://trusttasks.org/spec/auth/authenticate/0.1",
 //          from: client_did, to: [vta_did],
 //          body: { challenge, session_id } }
 //      (the inner body uses snake_case — that's what the VTA reads).
 //   3. Authcrypt-pack to the VTA's first keyAgreement key.
 //   4. POST /auth/ with the JWE JSON as `text/plain` body
 //      (the VTA route handler takes `body: String`).
-//   5. JSON-parse the response → `{ sessionId?, data: { accessToken,
-//      accessExpiresAt, refreshToken?, refreshExpiresAt? } }`.
+//   5. JSON-parse the response → the canonical `{ session, tokens }`
+//      (`AuthenticateResponse`): `session.{id,issuedAt,…}` +
+//      `tokens.{accessToken,refreshToken?,expiresIn,refreshExpiresIn?}`.
+//      `tokens` carries RELATIVE lifetimes; we convert to absolute
+//      Unix-second `accessExpiresAt`/`refreshExpiresAt` for the caller.
 //
 // `refresh()` reuses the same authcrypt-pack-and-POST machinery
-// against `/auth/refresh` (message type `.../authenticate/refresh`,
-// body `{ refresh_token }`). The VTA rotates the refresh token on
+// against `/auth/refresh` (message type
+// `https://trusttasks.org/spec/auth/refresh/0.1`, body
+// `{ refresh_token }`). The VTA rotates the refresh token on
 // every call (RFC 6749 §10.4), so the returned `refreshToken` must
 // replace the one the caller held — replaying the spent token fails.
 //
@@ -37,8 +42,12 @@ import * as multibase from "./multibase.js";
 import * as jwk from "./jwk.js";
 import * as x25519 from "./x25519.js";
 
-const AUTH_MESSAGE_TYPE = "https://affinidi.com/atm/1.0/authenticate";
-const REFRESH_MESSAGE_TYPE = "https://affinidi.com/atm/1.0/authenticate/refresh";
+// Canonical Trust-Task message-type URIs the current VTA accepts on the
+// DIDComm-envelope auth path (`vta-service/src/routes/auth.rs`). The legacy
+// `https://affinidi.com/atm/1.0/authenticate[/refresh]` aliases were removed
+// from the server, so sending them now fails with "unexpected message type".
+const AUTH_MESSAGE_TYPE = "https://trusttasks.org/spec/auth/authenticate/0.1";
+const REFRESH_MESSAGE_TYPE = "https://trusttasks.org/spec/auth/refresh/0.1";
 
 /**
  * Authenticate to a VTA over REST using DIDComm-packed challenge
@@ -92,9 +101,14 @@ export async function authenticate({
   const challenge = await postJson(
     ctx.fetchFn,
     joinUrl(baseUrl, "/auth/challenge"),
+    // The canonical field is `subject`; the VTA still accepts `did` as a
+    // one-release deserialize alias (`ChallengeRequest`), so this keeps
+    // working against both current and not-yet-upgraded VTAs.
     { did: clientDid },
   );
-  if (!challenge?.sessionId || !challenge?.data?.challenge) {
+  // Current VTA emits a FLAT `{ challenge, sessionId, expiresAt }`
+  // (`ChallengeResponse`) — no `data` envelope.
+  if (!challenge?.sessionId || !challenge?.challenge) {
     throw new Error(
       `vta-rest-auth: /auth/challenge response missing sessionId or challenge (got ${JSON.stringify(challenge)})`,
     );
@@ -105,8 +119,8 @@ export async function authenticate({
     path: "/auth/",
     type: AUTH_MESSAGE_TYPE,
     body: {
-      challenge: challenge.data.challenge,
-      // The VTA reads `session_id` (snake_case) from the body.
+      challenge: challenge.challenge,
+      // The VTA reads `session_id` (snake_case) from the message body.
       session_id: challenge.sessionId,
     },
   });
@@ -267,20 +281,53 @@ async function packAndPost(ctx, { path, type, body }) {
   return postRaw(ctx.fetchFn, joinUrl(ctx.baseUrl, path), jweJson, "text/plain");
 }
 
-/** Validate + normalize a `/auth/`-family token response. */
+/**
+ * Validate + normalize a `/auth/`-family token response.
+ *
+ * The current VTA emits the canonical `{ session, tokens }`
+ * (`AuthenticateResponse`) where `tokens` is an OAuth 2.0-shaped
+ * `TokenBundle` carrying RELATIVE lifetimes (`expiresIn` /
+ * `refreshExpiresIn`, seconds from issuance) rather than absolute
+ * timestamps. We convert to absolute Unix-second expiries against the
+ * session's `issuedAt`, mirroring the Rust
+ * `AuthenticateResponse::{access,refresh}_expires_at_epoch` helpers, so the
+ * caller-facing `{accessExpiresAt, refreshExpiresAt}` contract is preserved.
+ */
 function tokenResult(resp, path) {
-  if (!resp?.data?.accessToken) {
+  const tokens = resp?.tokens;
+  const session = resp?.session;
+  if (!tokens?.accessToken) {
     throw new Error(
-      `vta-rest-auth: ${path} response missing accessToken (got ${JSON.stringify(resp)})`,
+      `vta-rest-auth: ${path} response missing tokens.accessToken (got ${JSON.stringify(resp)})`,
     );
   }
+  const issuedAtEpoch = rfc3339ToEpochSeconds(session?.issuedAt);
   return {
-    accessToken: resp.data.accessToken,
-    accessExpiresAt: resp.data.accessExpiresAt,
-    refreshToken: resp.data.refreshToken,
-    refreshExpiresAt: resp.data.refreshExpiresAt,
-    sessionId: resp.sessionId,
+    accessToken: tokens.accessToken,
+    accessExpiresAt: absoluteExpiry(issuedAtEpoch, tokens.expiresIn),
+    refreshToken: tokens.refreshToken,
+    refreshExpiresAt: absoluteExpiry(issuedAtEpoch, tokens.refreshExpiresIn),
+    sessionId: session?.id,
   };
+}
+
+/**
+ * Absolute Unix-second expiry from an issued-at epoch + a relative
+ * seconds-from-issuance lifetime. `undefined` when either input is absent,
+ * so an optional refresh lifetime cleanly yields `undefined`.
+ */
+function absoluteExpiry(issuedAtEpoch, expiresInSecs) {
+  if (issuedAtEpoch === undefined || typeof expiresInSecs !== "number") {
+    return undefined;
+  }
+  return issuedAtEpoch + expiresInSecs;
+}
+
+/** RFC 3339 / ISO-8601 string → Unix seconds, or `undefined` if unparseable. */
+function rfc3339ToEpochSeconds(iso) {
+  if (typeof iso !== "string") return undefined;
+  const ms = Date.parse(iso);
+  return Number.isNaN(ms) ? undefined : Math.floor(ms / 1000);
 }
 
 async function resolveVtaRecipient(vtaDid) {
