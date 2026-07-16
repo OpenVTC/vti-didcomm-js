@@ -23,6 +23,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   authcrypt is a true compatibility check once more. No shipped-package change
   (helper is `publish = false`, test-only), hence no version bump.
 
+## [0.6.2] - 2026-07-16
+
+### Fixed
+
+- **`mediator-transport.js` acks inbound messages only AFTER handing them off
+  (D8-F3).** `_dispatchFrame` sent the message-pickup 3.0 `messages-received`
+  ack — which makes the mediator delete its queued copy — *before* delivering
+  the message to a `waitFor` waiter or the `onMessage` listener. In an MV3 host,
+  a worker/offscreen-doc teardown between the ack and the consumer persisting the
+  message dropped it permanently (the mediator had already deleted it); a
+  consent/confirm request lost there is gone forever. Now the transport:
+  - **hands off first, then acks.** `onMessage` may return a promise, which the
+    transport awaits before acking — so a listener that persists durably can do
+    so before the mediator is told to drop its copy;
+  - **dedups at-least-once redelivery.** An un-acked message is redelivered on
+    reconnect; a bounded in-memory set of handled mediator queue-ids
+    (`sha256(packed frame)`) re-acks a duplicate without re-dispatching it, so a
+    lost/racing ack can't double-fire the handler within a session. Durable
+    cross-restart dedup remains the consumer's responsibility, and `onMessage`
+    is now documented as at-least-once.
+
+  Mediator-originated frames (status, problem-report) are still neither acked
+  nor deduped, preserving the anti-ack-loop filter.
+
 ## [0.6.1] - 2026-07-16
 
 ### Fixed

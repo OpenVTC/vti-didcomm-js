@@ -328,6 +328,131 @@ test("MediatorSession: does NOT ack frames from the mediator itself (status / pr
   session.close();
 });
 
+test("MediatorSession: hands the message to onMessage BEFORE acking, and awaits an async handler (R1.6)", async () => {
+  const client = generateEphemeralClient();
+  const vta = generateEphemeralClient();
+  const mediatorKp = keypairDid();
+  const mediator = {
+    did: mediatorKp.did,
+    kid: mediatorKp.kid,
+    x25519Pub: mediatorKp.publicKey,
+    wsEndpoint: "wss://mediator.test/ws",
+  };
+
+  let sentAtHandoff = null;
+  let releasePersist;
+  const persisted = new Promise((r) => (releasePersist = r));
+  const session = new MediatorSession({
+    mediator,
+    mediatorJwt: "med.jwt.token",
+    client,
+    senderKeys: new Map([[vta.did, { publicJwk: jwk.publicJwk("X25519", vta.publicKey) }]]),
+    WebSocketImpl: FakeWebSocket,
+    // Simulate a consumer that persists asynchronously before returning.
+    onMessage: async () => {
+      sentAtHandoff = FakeWebSocket.last.sent.length;
+      await persisted;
+    },
+  });
+
+  await session.connect();
+  const ws = FakeWebSocket.last;
+  assert.equal(ws.sent.length, 1); // live-delivery-change only
+
+  const inboundJwe = await pack({
+    message: {
+      id: "urn:uuid:inbound-durable",
+      type: "https://trusttasks.org/wallet/confirm/1.0",
+      from: vta.did,
+      to: [client.did],
+      body: { challenge: "c1" },
+    },
+    sender: { kid: vta.kid, privateJwk: jwk.privateJwk("X25519", vta.privateKey, vta.publicKey) },
+    recipient: { kid: client.kid, publicJwk: jwk.publicJwk("X25519", client.publicKey) },
+  });
+
+  ws.inject(inboundJwe);
+  await new Promise((r) => setTimeout(r, 50));
+
+  // The handler ran; the ack has NOT been sent because the handler is still
+  // persisting. This is the durability guarantee: a teardown here loses
+  // nothing, because the mediator still holds its copy.
+  assert.equal(sentAtHandoff, 1, "onMessage ran before any ack was sent");
+  assert.equal(ws.sent.length, 1, "ack withheld until the handler finishes persisting");
+
+  // Let the handler finish; only now may the ack go out.
+  releasePersist();
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(ws.sent.length, 2, "ack sent only after durable handoff completes");
+
+  session.close();
+});
+
+test("MediatorSession: dedups an at-least-once redelivery — handler fires once, re-acks", async () => {
+  const client = generateEphemeralClient();
+  const vta = generateEphemeralClient();
+  const mediatorKp = keypairDid();
+  const mediator = {
+    did: mediatorKp.did,
+    kid: mediatorKp.kid,
+    x25519Pub: mediatorKp.publicKey,
+    wsEndpoint: "wss://mediator.test/ws",
+  };
+
+  const received = [];
+  const session = new MediatorSession({
+    mediator,
+    mediatorJwt: "med.jwt.token",
+    client,
+    senderKeys: new Map([[vta.did, { publicJwk: jwk.publicJwk("X25519", vta.publicKey) }]]),
+    WebSocketImpl: FakeWebSocket,
+    onMessage: (msg) => received.push(msg),
+  });
+
+  await session.connect();
+  const ws = FakeWebSocket.last;
+
+  const inboundJwe = await pack({
+    message: {
+      id: "urn:uuid:inbound-dup",
+      type: "https://trusttasks.org/wallet/confirm/1.0",
+      from: vta.did,
+      to: [client.did],
+      body: { challenge: "c1" },
+    },
+    sender: { kid: vta.kid, privateJwk: jwk.privateJwk("X25519", vta.privateKey, vta.publicKey) },
+    recipient: { kid: client.kid, publicJwk: jwk.publicJwk("X25519", client.publicKey) },
+  });
+
+  // First delivery, then the mediator redelivers the identical stored frame
+  // (e.g. our earlier ack never reached it before a reconnect).
+  ws.inject(inboundJwe);
+  await new Promise((r) => setTimeout(r, 50));
+  ws.inject(inboundJwe);
+  await new Promise((r) => setTimeout(r, 50));
+
+  // Handler fired exactly once despite two deliveries.
+  assert.equal(received.length, 1, "duplicate redelivery is not re-dispatched");
+
+  // Each delivery is still acked (ldc + ack + re-ack = 3), so the mediator
+  // eventually drops its copy even if the first ack was lost. Both acks carry
+  // the same queue-id.
+  assert.equal(ws.sent.length, 3, "the redelivery is re-acked, not swallowed");
+  const { unpack } = await import("../src/unpack.js");
+  const expectedQueueId = await sha256HexUtf8(inboundJwe);
+  for (const frame of [ws.sent[1], ws.sent[2]]) {
+    const ack = await unpack(
+      frame,
+      { kid: mediatorKp.kid, privateJwk: jwk.privateJwk("X25519", mediatorKp.privateKey, mediatorKp.publicKey) },
+      { publicJwk: jwk.publicJwk("X25519", client.publicKey) },
+    );
+    assert.equal(ack.message.type, "https://didcomm.org/messagepickup/3.0/messages-received");
+    assert.deepEqual(ack.message.body.message_id_list, [expectedQueueId]);
+  }
+
+  session.close();
+});
+
 // Match the mediator's `sha256::digest(message.as_bytes())` byte-for-byte:
 // lowercase hex over the UTF-8 bytes of the packed JWE text.
 async function sha256HexUtf8(text) {
