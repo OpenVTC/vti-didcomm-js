@@ -12,9 +12,17 @@ path = "src/main.rs"
 
 [dependencies]
 # Keep `affinidi-messaging-didcomm` aligned with the version the VTA +
-# mediator pin (currently 0.13) so the round-trip stays a true wire-
-# compatibility check.
-affinidi-messaging-didcomm = "0.13"
+# mediator pin (currently 0.15) so the round-trip stays a true wire-
+# compatibility check. 0.15 carries the ECDH-1PU Concat-KDF cc_tag
+# length-prefix fix (upstream #322) that JS pack adopted in 0.5.0 — with
+# the old 0.13 the helper computed the legacy (unprefixed) KEK and
+# JS→Rust authcrypt unwrap failed the AES-KW integrity check.
+affinidi-messaging-didcomm = "0.15"
+# 0.15 moved the key-agreement types (`Curve`, `PrivateKeyAgreement`,
+# `PublicKeyAgreement`) out of `affinidi_messaging_didcomm::crypto` into
+# `affinidi_crypto::jose::key_agreement`. Pull them from their new home,
+# aligned with the workspace pin.
+affinidi-crypto = "0.2"
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
