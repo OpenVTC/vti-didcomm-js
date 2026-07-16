@@ -114,6 +114,13 @@ function decodeJwtExp(jwt) {
 // misbehaving mediator pushing unsolicited frames.
 const MAX_INBOX = 256;
 
+// Cap on the in-memory set of already-handled mediator queue-ids used for
+// at-least-once dedup. The mediator only redelivers un-acked messages, so this
+// only needs to cover the window between a handled message and its (possibly
+// lost) ack within a single session; bounded so a long-lived tab can't grow it
+// without limit. Durable cross-restart dedup is the consumer's responsibility.
+const MAX_SEEN = 1024;
+
 /**
  * Build the `live-delivery-change` plaintext that enables live
  * delivery over the current WebSocket. The caller authcrypt-packs it
@@ -236,11 +243,16 @@ export class MediatorSession {
    * @param {Map<string,Object>} [args.senderKeys] - seed sender keys.
    * @param {Function} [args.resolveSender] - async sender-key fallback.
    * @param {Function} [args.WebSocketImpl] - WebSocket ctor (default global).
-   * @param {(message: Object, thid: string) => void} [args.onMessage] - called
-   *   for each inbound message NOT claimed by a `waitFor` waiter (unsolicited
-   *   inbound, e.g. a server-initiated request). Fired in addition to the
-   *   internal buffering, so request/reply via `waitFor` is unaffected;
-   *   handlers should filter by the message `type`.
+   * @param {(message: Object, thid: string) => void|Promise<void>} [args.onMessage]
+   *   - called for each inbound message NOT claimed by a `waitFor` waiter
+   *   (unsolicited inbound, e.g. a server-initiated request). Fired in addition
+   *   to the internal buffering, so request/reply via `waitFor` is unaffected;
+   *   handlers should filter by the message `type`. **If it returns a promise,
+   *   the transport awaits it before acking the frame to the mediator** — a
+   *   handler that persists the message durably should do so before resolving,
+   *   so an MV3 teardown between handoff and ack cannot lose it (R1.6). Delivery
+   *   is at-least-once: a handler must tolerate seeing the same message twice
+   *   across a reconnect and dedupe durably on its own side.
    * @param {(bytes: Uint8Array) => void} [args.onTspFrame] - called for each
    *   inbound TSP frame the mediator multiplexes onto this socket (raw qb2
    *   bytes, first byte 0xF8). Without it, TSP frames are dropped rather than
@@ -293,6 +305,10 @@ export class MediatorSession {
     // plus the set of pending waiters keyed by the thid they want.
     this._inbox = [];
     this._waiters = [];
+    // Mediator queue-ids (sha256 of the packed frame) we've already handed
+    // off. Bounds re-dispatch of an at-least-once redelivery when an ack was
+    // lost mid-session. Insertion-ordered so the oldest evicts first.
+    this._seen = new Set();
   }
 
   /** Our recipient descriptor for unpack. */
@@ -560,52 +576,89 @@ export class MediatorSession {
   }
 
   async _dispatchFrame(result, text) {
-    // Ack delivery so the mediator deletes its queued copy and stops
-    // replaying it on the next (re)connection. Two non-obvious points:
+    // R1.6 — hand the message off to its consumer (durably, when the consumer
+    // persists) BEFORE acking. The ack tells the mediator to delete its queued
+    // copy and stop replaying it (message-pickup 3.0); if we acked first and
+    // the host (MV3 offscreen doc / service worker) were torn down before the
+    // consumer persisted, the message would be lost forever — the mediator has
+    // already dropped it. Ack-after-handoff instead makes delivery
+    // at-least-once: an un-acked message is redelivered on reconnect. In-memory
+    // dedup below keeps that safe within a session; durable cross-restart dedup
+    // is the consumer's job.
     //
-    //   1. The mediator's queue-id is sha256(packed JWE bytes), NOT the
-    //      inner DIDComm message id (which is set by the original
-    //      sender, e.g. the VTA, and is unknown to the mediator). See
-    //      affinidi-messaging-mediator memory_store.rs `store_message`:
-    //      `let msg_id = digest(message.as_bytes());`.
-    //   2. Skip the ack when the frame is from the mediator itself
-    //      (status, problem-report, …). Those aren't queued messages,
-    //      and acking one provokes another status reply — which is
-    //      itself from the mediator, so acking THAT provokes another,
-    //      and so on (~one round-trip every ~300ms). Filtering by
-    //      sender breaks that loop.
-    //
-    // Best-effort + fire-and-forget: a failed ack must never break frame
-    // processing, and we ack regardless of whether a waiter claims the
-    // message below.
+    // Two non-obvious points about the ack itself:
+    //   1. The mediator's queue-id is sha256(packed JWE bytes), NOT the inner
+    //      DIDComm message id (set by the original sender, unknown to the
+    //      mediator). See affinidi-messaging-mediator memory_store.rs
+    //      `store_message`: `let msg_id = digest(message.as_bytes());`.
+    //   2. Frames from the mediator itself (status, problem-report, …) are not
+    //      queued messages: don't ack them (acking one provokes another status
+    //      reply, which is also from the mediator — an endless ~300ms loop) and
+    //      don't dedup them. Filtering by sender breaks that loop.
     const senderDid = result.senderKid ? result.senderKid.split("#")[0] : null;
-    if (senderDid && senderDid !== this.mediator.did) {
-      void this._ackReceived(await sha256Hex(text));
+    const isQueued = senderDid && senderDid !== this.mediator.did;
+
+    // For a queued message, the mediator queue-id doubles as the ack id and the
+    // dedup key.
+    const queueId = isQueued ? await sha256Hex(text) : null;
+    if (queueId && this._seen.has(queueId)) {
+      // Already handled this exact delivery (a redelivery after a lost/racing
+      // ack). Re-ack so the mediator finally drops it, but do NOT re-dispatch.
+      void this._ackReceived(queueId);
+      return;
     }
-    // Try to hand it to a matching waiter; else buffer it.
+
+    // Hand off first (awaiting an async consumer so it can persist), THEN ack.
+    await this._deliver(result);
+
+    if (queueId) {
+      this._markSeen(queueId);
+      // Best-effort + fire-and-forget: a failed ack must never break frame
+      // processing — the message is redelivered and deduped instead.
+      void this._ackReceived(queueId);
+    }
+  }
+
+  /**
+   * Deliver an unpacked inbound message to its consumer: a matching `waitFor`
+   * waiter if one is pending, otherwise the `onMessage` listener (buffered for
+   * a late waiter either way). Awaits `onMessage` so a listener that persists
+   * asynchronously completes before the caller acks (R1.6).
+   */
+  async _deliver(result) {
     const thid = result.message.thid ?? result.message.id;
     const idx = this._waiters.findIndex((w) => w.thid === thid);
     if (idx >= 0) {
       const [w] = this._waiters.splice(idx, 1);
       clearTimeout(w.timer);
       w.resolve(result.message);
-    } else {
-      // Buffer for a not-yet-registered waiter, but bound the buffer so a
-      // chatty/malicious mediator can't grow it without limit in a
-      // long-lived tab. Drop the oldest when over the cap.
-      this._inbox.push({ thid, message: result.message });
-      if (this._inbox.length > MAX_INBOX) this._inbox.shift();
-      // Surface unsolicited inbound (server-initiated requests) to a
-      // listener, if one is registered. Buffering above is preserved so a
-      // late `waitFor` for a raced reply still finds it; the listener should
-      // filter by message `type`.
-      if (this.onMessage) {
-        try {
-          this.onMessage(result.message, thid);
-        } catch {
-          // A throwing listener must not break frame processing.
-        }
+      return;
+    }
+    // Buffer for a not-yet-registered waiter, but bound the buffer so a
+    // chatty/malicious mediator can't grow it without limit in a long-lived
+    // tab. Drop the oldest when over the cap.
+    this._inbox.push({ thid, message: result.message });
+    if (this._inbox.length > MAX_INBOX) this._inbox.shift();
+    // Surface unsolicited inbound (server-initiated requests) to a listener, if
+    // one is registered. Buffering above is preserved so a late `waitFor` for a
+    // raced reply still finds it; the listener should filter by message `type`.
+    if (this.onMessage) {
+      try {
+        // Await so a listener returning a promise (e.g. persist-to-storage)
+        // finishes before we ack. A synchronous listener returns undefined and
+        // `await` resolves immediately.
+        await this.onMessage(result.message, thid);
+      } catch {
+        // A throwing listener must not break frame processing.
       }
+    }
+  }
+
+  /** Record a handled queue-id for dedup, evicting the oldest past the cap. */
+  _markSeen(queueId) {
+    this._seen.add(queueId);
+    if (this._seen.size > MAX_SEEN) {
+      this._seen.delete(this._seen.values().next().value);
     }
   }
 
