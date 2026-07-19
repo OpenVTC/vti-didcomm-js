@@ -73,6 +73,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   change; the `package-lock.json` `version` field (long stale at 0.2.0) is also
   corrected.
 
+## [0.6.2] - 2026-07-16
+
+### Fixed
+
+- **Hand inbound messages to the consumer BEFORE acking the mediator (R1.6).**
+  `_dispatchFrame` sent the message-pickup 3.0 `messages-received` ack — which
+  makes the mediator delete its queued copy — *before* delivering the message
+  to a `waitFor` waiter or the `onMessage` listener. In an MV3 host, a
+  worker/offscreen teardown between the ack and the consumer persisting the
+  message drops it forever: the mediator has already deleted it and will not
+  replay. A consent/confirm request lost there is unrecoverable.
+
+  Delivery is now at-least-once: hand off first (awaiting `onMessage` if it
+  returns a promise, so a listener that persists asynchronously finishes
+  before the mediator is told to drop its copy), then ack. A bounded
+  in-memory set of handled mediator queue-ids re-acks a redelivered duplicate
+  without re-dispatching it, so a lost or racing ack cannot double-fire the
+  handler within a session.
+
+  **Consumer note:** `onMessage` may now return a promise the transport
+  awaits, and must tolerate seeing the same message twice across a reconnect —
+  durable cross-restart de-duplication remains the consumer's responsibility.
+
+## [0.6.1] - 2026-07-16
+
+### Fixed
+
+- **REST auth realigned to the current VTA wire contract (R3.6).**
+  `vta-rest-auth.js` sent the removed legacy DIDComm message types
+  (`https://affinidi.com/atm/1.0/authenticate[/refresh]`) and parsed response
+  envelopes the VTA stopped emitting months ago (`{sessionId, data:{challenge}}`
+  and `{data:{accessToken,...}}`), so REST auth through this library could not
+  succeed against a current VTA at all. Now uses
+  `https://trusttasks.org/spec/auth/authenticate/0.1` and the current flat
+  response shapes. (Mediator auth is a separate service and legitimately keeps
+  its own message type.)
+
+## [0.6.0] - 2026-07-15
+
+### Added
+
+- **TSP frame multiplexing over the mediator socket.** The mediator can
+  interleave TSP frames (raw CESR qb2, first byte `0xF8`, delivered as
+  base64url text) onto the same WebSocket as DIDComm traffic. A new
+  `onTspFrame` handler receives those bytes; without one they are dropped
+  rather than being fed to the DIDComm unpacker, which cannot read them.
+
 ## [0.5.0] - 2026-06-01
 
 ### Fixed
