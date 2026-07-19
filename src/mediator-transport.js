@@ -248,8 +248,16 @@ export class MediatorSession {
    * @param {() => void} [args.onClose] - called once if the socket drops
    *   unexpectedly (after a successful open, not via `close()`). Lets a
    *   warm-session holder evict + reconnect.
+   * @param {(message: Object, ctx: {thid: string, queueId: string}) => Promise<void>} [args.beforeAck]
+   *   - awaited BEFORE the delivery ack is sent, so a consumer can durably
+   *   persist the message while the mediator still holds its copy (R1.6).
+   *   **If it rejects, the ack is not sent** and the mediator will redeliver
+   *   on the next connection — losing a message is worse than handling it
+   *   twice, which callers already de-duplicate. Without this hook the ack
+   *   fires immediately, and a consumer that dies before persisting loses the
+   *   message permanently: the mediator has already dropped its only copy.
    */
-  constructor({ mediator, mediatorJwt, client, senderKeys, resolveSender, WebSocketImpl, onMessage, onTspFrame, onClose, onError, connectTimeoutMs }) {
+  constructor({ mediator, mediatorJwt, client, senderKeys, resolveSender, WebSocketImpl, onMessage, onTspFrame, onClose, onError, connectTimeoutMs, beforeAck }) {
     if (!mediator?.wsEndpoint) {
       throw new Error("MediatorSession: mediator.wsEndpoint required (mediator advertises no wss endpoint)");
     }
@@ -263,6 +271,10 @@ export class MediatorSession {
     this.senderKeys = senderKeys ?? new Map();
     this.resolveSender = resolveSender;
     this.onMessage = onMessage;
+    // Awaited before the delivery ack, so a consumer can persist while the
+    // mediator still holds its copy. See `_dispatchFrame` for the ordering
+    // and why a rejection suppresses the ack rather than being swallowed.
+    this.beforeAck = beforeAck;
     // Fired for each inbound TSP frame (a non-DIDComm message the mediator
     // multiplexes onto this same socket — CESR qb2, first byte 0xF8, delivered
     // as base64url(qb2) text). Receives the raw qb2 bytes; a TSP consumer
@@ -578,12 +590,34 @@ export class MediatorSession {
     // Best-effort + fire-and-forget: a failed ack must never break frame
     // processing, and we ack regardless of whether a waiter claims the
     // message below.
+    //
+    // ORDERING (R1.6): when a `beforeAck` hook is registered it is awaited
+    // FIRST. The ack tells the mediator to delete its queued copy, so it is
+    // the point of no return — after it, this process holds the only copy of
+    // the message. A consumer that must not lose the message (a consent
+    // request whose prompt is a security control) persists it in that hook
+    // while the mediator's copy still exists.
+    //
+    // A rejecting hook SUPPRESSES the ack: the mediator keeps the message and
+    // redelivers on the next connection. Duplicate delivery is a problem
+    // consumers already solve with de-duplication; silent loss is not
+    // recoverable at all.
+    const thid = result.message.thid ?? result.message.id;
     const senderDid = result.senderKid ? result.senderKid.split("#")[0] : null;
     if (senderDid && senderDid !== this.mediator.did) {
-      void this._ackReceived(await sha256Hex(text));
+      const queueId = await sha256Hex(text);
+      let persisted = true;
+      if (this.beforeAck) {
+        try {
+          await this.beforeAck(result.message, { thid, queueId });
+        } catch (err) {
+          persisted = false;
+          this._reportFrameError("beforeAck (ack suppressed; will redeliver)", err, text);
+        }
+      }
+      if (persisted) void this._ackReceived(queueId);
     }
     // Try to hand it to a matching waiter; else buffer it.
-    const thid = result.message.thid ?? result.message.id;
     const idx = this._waiters.findIndex((w) => w.thid === thid);
     if (idx >= 0) {
       const [w] = this._waiters.splice(idx, 1);

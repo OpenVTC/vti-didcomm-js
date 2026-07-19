@@ -5,6 +5,28 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-07-19
+
+### Added
+
+- **`beforeAck` hook on `MediatorSession` — persist before ack (R1.6).**
+  The delivery ack tells the mediator to delete its queued copy, so it is the
+  point of no return: after it, the consumer holds the only copy of the
+  message. Until now the ack fired *before* `onMessage` ran, so a consumer
+  that died between the two lost the message permanently — the mediator had
+  dropped it, and nothing else had stored it.
+
+  `beforeAck(message, { thid, queueId })` is awaited **before** the ack is
+  sent, while the mediator's copy still exists, so a consumer can durably
+  store the message first. If the hook rejects the ack is **suppressed** and
+  the mediator redelivers on the next connection: duplicate delivery is
+  something consumers already de-duplicate, whereas silent loss is not
+  recoverable at all. The failure is reported via `onError` rather than
+  swallowed, and the message is still delivered in-memory so a user can act
+  on it now.
+
+  Purely additive — without the hook the ack behaviour is unchanged.
+
 ## [0.5.0] - 2026-06-01
 
 ### Fixed
