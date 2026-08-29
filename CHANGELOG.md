@@ -23,6 +23,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   authcrypt is a true compatibility check once more. No shipped-package change
   (helper is `publish = false`, test-only), hence no version bump.
 
+## [0.7.0] - 2026-08-29
+
+### Fixed
+
+- **Inbound TSP frames are now acked, and the consumer is awaited first
+  (R1.6).** The single-socket TSP demux added in 0.6.0 routed a `-E` frame to
+  `onTspFrame` and returned — before `_dispatchFrame`, which is what acks. But
+  the mediator does not treat TSP specially: `handle_inbound_tsp` stores a
+  Direct message "reusing the protocol-neutral store path that DIDComm direct
+  delivery uses", and live delivery fetches with `DoNotDelete` because
+  "redelivery is a notification re-cover, not an ack". TSP obeys the same
+  delete-to-ack contract as DIDComm, and nothing was ever deleting.
+
+  Every TSP message a client received therefore stayed queued at the mediator
+  and was redelivered on every reconnect, indefinitely. Request/reply masked it
+  completely: the consumer's waiter took the first delivery and discarded each
+  redelivery as a straggler with no outstanding request. The symptoms are a
+  monotonically growing mediator inbox and reconnect traffic that scales with
+  everything the client has ever received — neither of which surfaces as an
+  error anywhere.
+
+  `_dispatchTspFrame` now applies the ordering `_dispatchFrame` applies to
+  DIDComm — hand off, **await**, then ack — with the same `sha256(text)`
+  queue-id, which is correct unchanged because the mediator stores the qb64
+  text form that it delivers. The bounded `_seen` set now covers TSP too, so a
+  redelivery is re-acked without being dispatched twice.
+
+  Two deliberate differences from the DIDComm path, both documented at the
+  method: there is no `isQueued` sender check (the mediator speaks DIDComm JSON
+  to us and never emits a `-E` frame of its own, and this transport is key-blind
+  for TSP regardless), and a **throwing consumer withholds the ack**, so the
+  message is redelivered rather than deleted after a failed persist.
+
+### Changed
+
+- **`onTspFrame` may return a promise, and is awaited before the ack.** A
+  synchronous handler is unaffected. A handler that persists asynchronously —
+  what R1.6 requires of an MV3 host — now completes before the mediator is told
+  to delete its copy. A client constructed without `onTspFrame` no longer acks
+  TSP frames at all: nothing has handled them, so they stay queued.
+
 ## [0.6.2] - 2026-07-16
 
 ### Fixed
