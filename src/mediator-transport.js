@@ -253,14 +253,16 @@ export class MediatorSession {
    *   so an MV3 teardown between handoff and ack cannot lose it (R1.6). Delivery
    *   is at-least-once: a handler must tolerate seeing the same message twice
    *   across a reconnect and dedupe durably on its own side.
-   * @param {(bytes: Uint8Array) => void} [args.onTspFrame] - called for each
-   *   inbound TSP frame the mediator multiplexes onto this socket (raw qb2
-   *   bytes, first byte 0xF8). Without it, TSP frames are dropped rather than
-   *   run through the DIDComm unpacker (which can't read them).
-   * @param {() => void} [args.onClose] - called once if the socket drops
-   *   unexpectedly (after a successful open, not via `close()`). Lets a
-   *   warm-session holder evict + reconnect.
-   */
+   * @param {(bytes: Uint8Array) => void|Promise<void>} [args.onTspFrame] - called
+   *   for each inbound TSP frame (raw qb2 bytes), which the mediator multiplexes
+   *   onto this same socket. **Awaited before the frame is acked**, exactly as
+   *   `onMessage` is (R1.6): the ack deletes the mediator's queued copy, so a
+   *   consumer that persists asynchronously must finish first. A throw withholds
+   *   the ack and the message is redelivered. Without a handler, TSP frames are
+   *   neither dispatched nor acked — they stay queued, since nothing has
+   *   handled them — and are never run through the DIDComm unpacker (which
+   *   cannot read them).
+*/
   constructor({ mediator, mediatorJwt, client, senderKeys, resolveSender, WebSocketImpl, onMessage, onTspFrame, onClose, onError, connectTimeoutMs }) {
     if (!mediator?.wsEndpoint) {
       throw new Error("MediatorSession: mediator.wsEndpoint required (mediator advertises no wss endpoint)");
@@ -278,8 +280,10 @@ export class MediatorSession {
     // Fired for each inbound TSP frame (a non-DIDComm message the mediator
     // multiplexes onto this same socket — CESR qb2, first byte 0xF8, delivered
     // as base64url(qb2) text). Receives the raw qb2 bytes; a TSP consumer
-    // unpacks them. Without a handler, TSP frames are dropped (not run through
-    // the DIDComm unpacker, which can't read them).
+    // unpacks them. Awaited before the frame is acked (R1.6) — see
+    // `_dispatchTspFrame`. Without a handler, TSP frames are neither dispatched
+    // nor acked, and are never run through the DIDComm unpacker (which can't
+    // read them).
     this.onTspFrame = onTspFrame;
     // Fired once when the socket drops *unexpectedly* (after a successful
     // open, not via close()). Lets a caller holding a warm session evict +
@@ -541,13 +545,7 @@ export class MediatorSession {
         this._reportFrameError("decode inbound TSP frame", err, text);
         return;
       }
-      if (this.onTspFrame) {
-        try {
-          this.onTspFrame(qb2);
-        } catch (err) {
-          this._reportFrameError("dispatch inbound TSP frame", err, text);
-        }
-      }
+      await this._dispatchTspFrame(qb2, text);
       return;
     }
 
@@ -573,6 +571,67 @@ export class MediatorSession {
       // listener, ack failure that escaped) must not break the loop.
       this._reportFrameError("dispatch inbound message", err, text);
     }
+  }
+
+  /**
+   * Hand a TSP frame to its consumer, then ack it — the same R1.6 ordering
+   * `_dispatchFrame` applies to DIDComm, and for the same reason.
+   *
+   * The mediator does not treat TSP specially. `handle_inbound_tsp` stores a
+   * Direct message "reusing the protocol-neutral store path that DIDComm
+   * direct delivery uses", base64url-encoded, and live delivery fetches with
+   * `DoNotDelete` because "redelivery is a notification re-cover, not an ack".
+   * So a TSP message obeys the same delete-to-ack contract, and the ack id is
+   * `sha256(text)` over the frame exactly as received — the mediator stores the
+   * qb64 text form, which is the form it delivers.
+   *
+   * Until this existed the TSP branch returned before ever reaching the ack,
+   * so every TSP message a client received stayed queued and was redelivered
+   * on each reconnect, forever. Replies masked it: the consumer's waiter took
+   * the first delivery and discarded every redelivery as a straggler.
+   *
+   * Two deliberate differences from the DIDComm path:
+   *
+   *  - **No `isQueued` sender check.** That check exists to avoid acking the
+   *    mediator's own status/problem-report frames, which would provoke another
+   *    status in an endless loop. The mediator speaks DIDComm JSON to us and
+   *    never emits a `-E` frame of its own, and this transport is key-blind for
+   *    TSP so it could not read a sender anyway. Every `-E` frame is a queued
+   *    message.
+   *  - **A throwing consumer is not acked.** `_deliver` swallows an
+   *    `onMessage` throw and acks regardless; here a throw means the consumer
+   *    did not persist, so the ack is withheld and the mediator redelivers.
+   *    (The DIDComm path's swallow-then-ack is the older behaviour and a
+   *    separate change — narrowing it here would alter delivery for every
+   *    existing listener.)
+   */
+  async _dispatchTspFrame(qb2, text) {
+    // No consumer means nothing has been persisted, so the frame must stay
+    // queued: a client built without `onTspFrame` is not one that has handled
+    // the message.
+    if (!this.onTspFrame) return;
+
+    const queueId = await sha256Hex(text);
+    if (this._seen.has(queueId)) {
+      // A redelivery after a lost or racing ack. Re-ack so the mediator finally
+      // drops it, but do not hand it to the consumer twice.
+      void this._ackReceived(queueId);
+      return;
+    }
+
+    try {
+      // Awaited: a consumer that persists asynchronously must finish before the
+      // ack tells the mediator to delete its only other copy.
+      await this.onTspFrame(qb2);
+    } catch (err) {
+      this._reportFrameError("dispatch inbound TSP frame", err, text);
+      return;
+    }
+
+    this._markSeen(queueId);
+    // Best-effort: a failed ack must never break frame processing — the message
+    // is redelivered and deduped instead.
+    void this._ackReceived(queueId);
   }
 
   async _dispatchFrame(result, text) {

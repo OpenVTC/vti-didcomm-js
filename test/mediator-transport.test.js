@@ -674,6 +674,92 @@ test("_onFrame does NOT route a DIDComm (JSON) frame to onTspFrame", async () =>
   assert.equal(frames.length, 0, "TSP consumer must not see a DIDComm frame");
 });
 
+/** A tsp session whose acks are captured instead of packed onto a socket. */
+function ackSpySession(onTspFrame, onError) {
+  const session = tspSession(onTspFrame, onError);
+  session.acked = [];
+  session._ackReceived = async (ids) => {
+    session.acked.push(...(Array.isArray(ids) ? ids : [ids]));
+  };
+  return session;
+}
+
+/** A "-E" frame whose bytes are distinct per `seed`. */
+function tspFrame(seed) {
+  const qb2 = new Uint8Array([0xf8, 0x41, seed, seed + 1, seed + 2]);
+  const text = base64url.encode(qb2);
+  assert.ok(text.startsWith("-E"), `expected "-E" prefix, got "${text.slice(0, 4)}"`);
+  return { qb2, text };
+}
+
+// R1.6 for TSP. The mediator stores a TSP message on the same store/pickup
+// path as DIDComm (`handle_inbound_tsp`) and live delivery fetches with
+// `DoNotDelete`, so the same delete-to-ack contract applies: acking first
+// would let an MV3 teardown between ack and persistence lose the message
+// permanently, because the ack is what deletes the mediator's copy.
+test("a TSP frame is acked only after its consumer has finished", async () => {
+  const order = [];
+  const { qb2, text } = tspFrame(10);
+  const session = ackSpySession(async (bytes) => {
+    assert.deepEqual(bytes, qb2);
+    await new Promise((r) => setTimeout(r, 20));
+    order.push("consumer done");
+  });
+  session._ackReceived = async (ids) => {
+    order.push("acked");
+    session.acked.push(...(Array.isArray(ids) ? ids : [ids]));
+  };
+  session.acked = [];
+
+  await session._onFrame(text);
+  await new Promise((r) => setTimeout(r, 10));
+
+  assert.deepEqual(order, ["consumer done", "acked"]);
+  // The ack id is sha256 over the frame exactly as received: the mediator
+  // stores the qb64 text form, which is the form it delivers.
+  assert.deepEqual(session.acked, [await sha256HexUtf8(text)]);
+});
+
+test("a TSP frame whose consumer throws is NOT acked, so the mediator redelivers it", async () => {
+  const errors = [];
+  const { text } = tspFrame(20);
+  const session = ackSpySession(async () => {
+    throw new Error("indexeddb write failed");
+  }, (e) => errors.push(e));
+
+  await session._onFrame(text);
+  await new Promise((r) => setTimeout(r, 10));
+
+  assert.deepEqual(session.acked, [], "a consumer that did not persist must not have its message deleted");
+  assert.equal(errors.length, 1, "the failure is reported rather than swallowed");
+});
+
+test("a redelivered TSP frame is re-acked but not handed to the consumer twice", async () => {
+  const seen = [];
+  const { text } = tspFrame(30);
+  const session = ackSpySession(async (bytes) => {
+    seen.push(bytes);
+  });
+
+  await session._onFrame(text);
+  await new Promise((r) => setTimeout(r, 10));
+  // The same delivery again — what happens after a lost or racing ack.
+  await session._onFrame(text);
+  await new Promise((r) => setTimeout(r, 10));
+
+  assert.equal(seen.length, 1, "one dispatch");
+  const id = await sha256HexUtf8(text);
+  assert.deepEqual(session.acked, [id, id], "re-acked so the mediator finally drops it");
+});
+
+test("a TSP frame with no consumer is not acked either — nothing has handled it", async () => {
+  const { text } = tspFrame(40);
+  const session = ackSpySession(undefined);
+  await session._onFrame(text);
+  await new Promise((r) => setTimeout(r, 10));
+  assert.deepEqual(session.acked, []);
+});
+
 test("a TSP frame with no onTspFrame handler is dropped (not run through DIDComm unpack)", async () => {
   const errors = [];
   const session = tspSession(undefined, (e) => errors.push(e));
