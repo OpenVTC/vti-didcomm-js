@@ -7,6 +7,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-11
+
+**Behaviour change for local development:** `allowInsecure: true` no longer
+admits loopback or private hosts. See *Migration* below.
+
+### Security
+
+- **Endpoints from a mediator DID document are checked before they are
+  dialed.** `parseMediatorEndpoints` (and therefore `resolveMediator`,
+  `authenticateToMediator` and `connectVtaViaMediator`) checked only the scheme
+  of the REST, auth and WebSocket endpoints a mediator's DID document
+  advertises; the host was used as given. Each endpoint now passes the new
+  egress guard: no userinfo; no `localhost`, `*.localhost`, `*.local`,
+  `*.internal` or `*.home.arpa`; no loopback, private, link-local, CGNAT,
+  documentation, multicast or reserved IP literal, including the
+  IPv4-mapped, IPv4-compatible, NAT64 and 6to4 forms of those; and, when the
+  caller supplies one, a host allow-list. The document is rejected if any
+  endpoint fails.
+- **No auth request follows a redirect.** Mediator auth and VTA REST auth send
+  `redirect: "manual"` and reject a 3xx (Node) or `opaqueredirect` (browser)
+  response, so an allowed endpoint cannot pass the request on to another host.
+  A caller-supplied `fetch` is wrapped the same way.
+- **`MediatorSession` checks `mediator.wsEndpoint`** (`wss:` by default) when
+  constructed and again before each socket open, so a hand-built `mediator`
+  object is held to the same policy.
+- **VTA REST `baseUrl` is checked** by `authenticate` / `refresh` before any
+  request: `https:` on a public host by default.
+- **Response bodies are no longer copied into error messages.** Mediator auth
+  and VTA REST auth errors for a non-2xx, non-JSON or incomplete response put
+  the body on `err.body` and the HTTP status on `err.status` instead.
+
+### Added
+
+- **`@openvtc/vti-didcomm-js/net-guard`**: a dependency-free egress guard for
+  browsers, MV3 extensions and Node. Exports `assertSafeEndpoint(url, policy)`,
+  `guardedFetch(fetchImpl, policy)`, `isBlockedIp(ip)` and
+  `BlockedEndpointError` (stable `code: "E_BLOCKED_ENDPOINT"`, plus `reason`,
+  `url`, `host` and `label`). Also available from the package root as the
+  `netGuard` namespace, with `BlockedEndpointError` and `BLOCKED_ENDPOINT` as
+  named exports.
+- **`@openvtc/vti-didcomm-js/net-guard/node`**: `guardedLookup(policy)`, a
+  `dns.lookup` replacement for `http(s).request`, `https.Agent` or undici's
+  `Agent({ connect: { lookup } })`. It refuses a hostname if any resolved
+  address is non-public and connects only to the addresses it checked. It is a
+  separate subpath, not re-exported from the root, so browser bundles never
+  import `node:dns`.
+- **`netPolicy: { allowInsecure, allowPrivate, allowHosts }`** on
+  `authenticateToMediator`, `resolveMediator`, `parseMediatorEndpoints`,
+  `MediatorSession`, `connectVtaViaMediator`, and VTA REST `authenticate` /
+  `refresh`.
+
+### Changed
+
+- `allowInsecure` now controls the scheme only. The top-level `allowInsecure`
+  option of `authenticateToMediator`, `resolveMediator` and
+  `parseMediatorEndpoints` is kept as a **deprecated** alias for
+  `netPolicy.allowInsecure`; when both are given, `netPolicy` wins.
+- `MediatorSession` refuses a `ws:` endpoint unless `netPolicy.allowInsecure`
+  is set. It previously accepted any endpoint.
+- VTA REST `authenticate` / `refresh` refuse an `http:` `baseUrl` unless
+  `netPolicy.allowInsecure` is set. They previously accepted one.
+- HTTP error messages from mediator and VTA REST auth now read
+  `<module>: <status> from <url>`, without the status text or body.
+
+### Migration
+
+- **Production** (https/wss on public hosts): no change is required. Passing
+  `netPolicy.allowHosts` with the mediator and VTA hosts you expect is
+  recommended. In a browser or extension it is the only control that also
+  covers a public name resolving to a private address.
+- **Local development** against `http://localhost`, `127.0.0.1`, a LAN address
+  or a `*.local` name: replace `allowInsecure: true` with
+  `netPolicy: { allowInsecure: true, allowPrivate: true }`. Pass the same
+  `netPolicy` to `MediatorSession` if you construct it yourself;
+  `connectVtaViaMediator` forwards it for you.
+- **Handling refusals:** test `err.code === "E_BLOCKED_ENDPOINT"` (or
+  `err instanceof BlockedEndpointError`). `err.reason` is one of
+  `invalid_url`, `scheme`, `userinfo`, `private_address`, `private_name`,
+  `not_allowlisted` or `redirect`.
+- **Response details:** read `err.status` and `err.body` rather than parsing
+  the error message.
+- A custom `fetch` must honour `redirect: "manual"`.
+
 ### Fixed
 
 - **Round-trip Rust helper realigned to `affinidi-messaging-didcomm` 0.15

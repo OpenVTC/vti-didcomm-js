@@ -88,6 +88,59 @@ Higher-level helpers:
 Each module is also a subpath export (e.g. `@openvtc/vti-didcomm-js/pack`,
 `@openvtc/vti-didcomm-js/resolver`, `@openvtc/vti-didcomm-js/mediator-transport`).
 
+## Network policy for endpoints you did not choose
+
+Mediator endpoints come from the mediator's DID document, and a VTA
+`baseUrl` usually comes from a QR code or config. The SDK checks both
+before dialing (`@openvtc/vti-didcomm-js/net-guard`). By default an
+endpoint must:
+
+- use `https:` or `wss:`;
+- carry no userinfo;
+- name a public host. Loopback, private, link-local, CGNAT and other
+  non-public IP literals are refused, including their IPv4-mapped and
+  NAT64 IPv6 forms, as are `localhost`, `*.localhost`, `*.local`,
+  `*.internal` and `*.home.arpa`.
+
+A refused endpoint throws `BlockedEndpointError`
+(`code: "E_BLOCKED_ENDPOINT"`, with a `reason`). Auth requests never
+follow redirects.
+
+Pass `netPolicy` to narrow or relax the policy:
+
+```js
+// Production: accept only the hosts you expect.
+await connectVtaViaMediator({
+  ...args,
+  netPolicy: { allowHosts: ["mediator.example.com", "*.vta.example.com"] },
+});
+
+// Local development against http://localhost.
+await connectVtaViaMediator({
+  ...args,
+  netPolicy: { allowInsecure: true, allowPrivate: true },
+});
+```
+
+`allowInsecure` only permits `http:` / `ws:`; it does not admit private
+hosts. `allowHosts` narrows the policy and never re-admits a blocked
+address. The same `netPolicy` option exists on `authenticateToMediator`,
+`resolveMediator`, `MediatorSession` and VTA REST `authenticate` /
+`refresh`.
+
+Browsers expose no DNS API, so a public name that resolves to a private
+address passes the URL check there; `allowHosts` is the strong control. In
+Node, `guardedLookup` also filters resolved addresses at connect time:
+
+```js
+import { Agent } from "undici";
+import { guardedLookup } from "@openvtc/vti-didcomm-js/net-guard/node";
+
+const dispatcher = new Agent({ connect: { lookup: guardedLookup() } });
+const fetch = (url, init) => globalThis.fetch(url, { ...init, dispatcher });
+await authenticateToMediator({ ...args, fetch });
+```
+
 ## Module map
 
 ```
@@ -114,13 +167,15 @@ src/
   vta-rest-auth.js      VTA /auth/ + refresh
   forward.js, mediator-auth.js, mediator-transport.js, vta-didcomm.js
                         mediator transport (auth, WS live delivery, sendAndWait)
+  net-guard.js          egress policy for untrusted endpoints (browser + Node)
+  net-guard-node.js     guardedLookup: DNS-answer filtering (Node only)
   index.js              public re-exports
 ```
 
 ## Tests
 
 ```sh
-npm test          # node --test; 150+ tests
+npm test          # node --test; 250+ tests
 ```
 
 Includes RFC 7518 §B.3 (A256CBC-HS512) and §C (Concat KDF) known-answer
