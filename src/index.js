@@ -8,6 +8,9 @@
 // B4: VTA REST auth via DIDComm-packed /auth/.
 // M1-M4: mediator transport — mediator auth, routing/2.0/forward,
 //        WebSocket + message-pickup 3.0 live delivery, sendAndWait.
+// net-guard: egress policy for endpoints the caller did not choose.
+//        The Node-only `guardedLookup` is deliberately NOT re-exported
+//        here (it imports node:dns); use the `./net-guard/node` subpath.
 
 export * as base64url from "./base64url.js";
 export * as multibase from "./multibase.js";
@@ -40,3 +43,5 @@ export { buildForward } from "./forward.js";
 export { authenticateToMediator, resolveMediator, parseMediatorEndpoints } from "./mediator-auth.js";
 export { MediatorSession, buildLiveDeliveryChange, buildMessagesReceived, peekSkid, unpackInbound } from "./mediator-transport.js";
 export { connectVtaViaMediator, VtaMediatorClient, resolveX25519KeyAgreement } from "./vta-didcomm.js";
+export * as netGuard from "./net-guard.js";
+export { BlockedEndpointError, BLOCKED_ENDPOINT } from "./net-guard.js";
