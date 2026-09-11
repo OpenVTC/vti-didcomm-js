@@ -33,9 +33,15 @@
 //
 // The client DID must be permitted by the mediator's ACL (its
 // /authenticate/challenge gate registers/blocks DIDs per acl_mode).
+//
+// Every endpoint here comes out of the mediator's DID document, which
+// the caller did not write. They pass the egress policy in
+// `net-guard.js` before anything is dialed, and no request follows a
+// redirect.
 
 import { resolve as resolveDid } from "./resolver.js";
 import { pack } from "./pack.js";
+import { assertSafeEndpoint, guardedFetch } from "./net-guard.js";
 import * as multibase from "./multibase.js";
 import * as jwk from "./jwk.js";
 
@@ -53,15 +59,27 @@ const AUTH_MESSAGE_TYPE = "https://affinidi.com/atm/1.0/authenticate";
  * @param {Uint8Array} args.clientX25519Public - 32-byte X25519 public.
  * @param {string} [args.clientKid] - caller's full kid; defaults to
  *   `${clientDid}#${x25519_multikey}`.
- * @param {Function} [args.fetch] - fetch impl; defaults to global.
+ * @param {Function} [args.fetch] - fetch impl; defaults to global. It
+ *   must honour `redirect: "manual"`.
+ * @param {import("./net-guard.js").NetPolicy} [args.netPolicy] - egress
+ *   policy for the endpoints the mediator's DID document advertises.
+ *   Defaults to https/wss and public hosts. Local development against
+ *   `http://localhost` needs `{ allowInsecure: true, allowPrivate: true }`.
+ * @param {boolean} [args.allowInsecure] - **Deprecated:** use
+ *   `netPolicy.allowInsecure`, which wins when both are set. Permits
+ *   plaintext schemes only; it no longer admits private hosts.
+ * @param {Function} [args.resolve] - DID resolver (default: the
+ *   built-in dispatcher).
  * @returns {Promise<{
  *   accessToken: string,
  *   accessExpiresAt: number,
  *   refreshToken: string,
  *   refreshExpiresAt: number,
  *   sessionId?: string,
- *   mediator: { restEndpoint: string, wsEndpoint: string, authEndpoint: string, kid: string },
+ *   mediator: { did: string, restEndpoint: string, wsEndpoint: string | null, authEndpoint: string, kid: string, x25519Pub: Uint8Array },
  * }>}
+ * @throws {import("./net-guard.js").BlockedEndpointError} if an advertised
+ *   endpoint fails the policy, or an endpoint answers with a redirect.
  */
 export async function authenticateToMediator({
   mediatorDid,
@@ -70,7 +88,8 @@ export async function authenticateToMediator({
   clientX25519Public,
   clientKid,
   fetch: customFetch,
-  allowInsecure = false,
+  netPolicy,
+  allowInsecure,
   resolve,
 }) {
   assertNonEmptyString("mediatorDid", mediatorDid);
@@ -83,21 +102,25 @@ export async function authenticateToMediator({
     throw new Error("mediator-auth: no fetch implementation available");
   }
 
-  const resolveOpts = { allowInsecure };
+  const policy = mergeNetPolicy(netPolicy, allowInsecure);
+  const resolveOpts = { netPolicy: policy };
   if (resolve) resolveOpts.resolve = resolve;
   const mediator = await resolveMediator(mediatorDid, resolveOpts);
   const resolvedClientKid = clientKid ?? defaultClientKid(clientDid, clientX25519Public);
 
+  // Each request re-checks its URL and refuses redirects, so a 3xx from
+  // the auth endpoint cannot carry the handshake to a host the policy
+  // never saw.
+  const safeFetch = guardedFetch(fetchFn, { ...policy, label: "mediator auth", schemes: ["https:"] });
+
   // ── Step 1: challenge ────────────────────────────────────────────
-  const challenge = await postJson(fetchFn, `${mediator.authEndpoint}/challenge`, {
+  const challenge = await postJson(safeFetch, `${mediator.authEndpoint}/challenge`, {
     did: clientDid,
   });
   const challengeStr = challenge?.data?.challenge;
   const sessionId = challenge?.data?.session_id ?? challenge?.sessionId;
   if (!challengeStr || !sessionId) {
-    throw new Error(
-      `mediator-auth: challenge response missing challenge or session_id (got ${JSON.stringify(challenge)})`,
-    );
+    throw responseError("mediator-auth: challenge response missing challenge or session_id", challenge);
   }
 
   // ── Step 2: pack the authenticate response ───────────────────────
@@ -128,12 +151,10 @@ export async function authenticateToMediator({
   // JWE goes as `application/json` (the JWE string is already valid
   // JSON). This differs from the VTA's /auth/, which takes a raw
   // `String` body (text/plain).
-  const auth = await postRaw(fetchFn, mediator.authEndpoint, jweJson, "application/json");
+  const auth = await postRaw(safeFetch, mediator.authEndpoint, jweJson, "application/json");
   const data = auth?.data;
   if (!data?.access_token) {
-    throw new Error(
-      `mediator-auth: authenticate response missing access_token (got ${JSON.stringify(auth)})`,
-    );
+    throw responseError("mediator-auth: authenticate response missing access_token", auth);
   }
   return {
     accessToken: data.access_token,
@@ -155,20 +176,23 @@ export async function authenticateToMediator({
  *
  * @param {string} mediatorDid
  * @param {Object} [options]
- * @param {boolean} [options.allowInsecure=false] - permit ws:///http:// endpoints.
+ * @param {import("./net-guard.js").NetPolicy} [options.netPolicy] - egress
+ *   policy for the advertised endpoints (see {@link authenticateToMediator}).
+ * @param {boolean} [options.allowInsecure] - **Deprecated** alias for
+ *   `netPolicy.allowInsecure`.
  * @param {Function} [options.resolve] - DID resolver (default: the
  *   built-in dispatcher). Injectable for tests.
  * @returns {Promise<{
- *   did: string, restEndpoint: string, wsEndpoint: string,
+ *   did: string, restEndpoint: string, wsEndpoint: string | null,
  *   authEndpoint: string, kid: string, x25519Pub: Uint8Array,
  * }>}
  */
-export async function resolveMediator(mediatorDid, { allowInsecure = false, resolve = resolveDid } = {}) {
+export async function resolveMediator(mediatorDid, { allowInsecure, netPolicy, resolve = resolveDid } = {}) {
   const { didDocument } = await resolve(mediatorDid);
   if (!didDocument || typeof didDocument !== "object") {
     throw new Error(`mediator-auth: could not resolve mediator DID ${mediatorDid}`);
   }
-  return parseMediatorEndpoints(didDocument, mediatorDid, { allowInsecure });
+  return parseMediatorEndpoints(didDocument, mediatorDid, { allowInsecure, netPolicy });
 }
 
 /**
@@ -176,14 +200,21 @@ export async function resolveMediator(mediatorDid, { allowInsecure = false, reso
  * keyAgreement. Pure (no I/O) — exported so the parsing is unit-
  * testable without a live resolver.
  *
+ * The whole document is rejected if any endpoint that would be dialed
+ * fails the egress policy.
+ *
  * @param {Object} didDocument
  * @param {string} mediatorDid
  * @param {Object} [options]
- * @param {boolean} [options.allowInsecure=false]
+ * @param {import("./net-guard.js").NetPolicy} [options.netPolicy]
+ * @param {boolean} [options.allowInsecure] - **Deprecated** alias for
+ *   `netPolicy.allowInsecure`.
  * @returns {{did:string, restEndpoint:string, wsEndpoint:string|null,
  *   authEndpoint:string, kid:string, x25519Pub:Uint8Array}}
+ * @throws {import("./net-guard.js").BlockedEndpointError}
  */
-export function parseMediatorEndpoints(didDocument, mediatorDid, { allowInsecure = false } = {}) {
+export function parseMediatorEndpoints(didDocument, mediatorDid, { allowInsecure, netPolicy } = {}) {
+  const policy = mergeNetPolicy(netPolicy, allowInsecure);
   if (!didDocument || typeof didDocument !== "object") {
     throw new Error(`mediator-auth: invalid DID document for ${mediatorDid}`);
   }
@@ -224,8 +255,8 @@ export function parseMediatorEndpoints(didDocument, mediatorDid, { allowInsecure
   // Refuse plaintext transports by default: a tampered/stale DID
   // document must not be able to downgrade us to `ws://` / `http://`,
   // which would leak the bearer JWT and traffic. Opt out only for
-  // local dev with `{ allowInsecure: true }`.
-  if (!allowInsecure) {
+  // local dev with `{ netPolicy: { allowInsecure: true } }`.
+  if (!policy.allowInsecure) {
     for (const [label, url] of [
       ["REST", restEndpoint],
       ["auth", authEndpoint],
@@ -233,9 +264,22 @@ export function parseMediatorEndpoints(didDocument, mediatorDid, { allowInsecure
     ]) {
       if (typeof url === "string" && (url.startsWith("http://") || url.startsWith("ws://"))) {
         throw new Error(
-          `mediator-auth: ${mediatorDid} advertises an insecure ${label} endpoint (${url}); pass { allowInsecure: true } to permit it`,
+          `mediator-auth: ${mediatorDid} advertises an insecure ${label} endpoint (${url}); pass { netPolicy: { allowInsecure: true } } to permit it`,
         );
       }
+    }
+  }
+
+  // The document chooses the host as well as the scheme. Refuse
+  // loopback, private, link-local / metadata and local-only names unless
+  // the caller opted in, and apply the caller's allow-list.
+  for (const [label, url, scheme] of [
+    ["REST", restEndpoint, "https:"],
+    ["auth", authEndpoint, "https:"],
+    ["WebSocket", wsEndpoint, "wss:"],
+  ]) {
+    if (typeof url === "string") {
+      assertSafeEndpoint(url, { ...policy, label: `mediator ${label}`, schemes: [scheme] });
     }
   }
 
@@ -252,6 +296,19 @@ export function parseMediatorEndpoints(didDocument, mediatorDid, { allowInsecure
 }
 
 // ─── Internals ──────────────────────────────────────────────────────────
+
+// `netPolicy` is the current option; the top-level `allowInsecure` flag is
+// its deprecated alias. An explicit `netPolicy.allowInsecure` wins.
+function mergeNetPolicy(netPolicy, legacyAllowInsecure) {
+  if (netPolicy != null && typeof netPolicy !== "object") {
+    throw new TypeError("mediator-auth: netPolicy must be an object");
+  }
+  return {
+    allowInsecure: Boolean(netPolicy?.allowInsecure ?? legacyAllowInsecure ?? false),
+    allowPrivate: Boolean(netPolicy?.allowPrivate ?? false),
+    allowHosts: netPolicy?.allowHosts ?? null,
+  };
+}
 
 function extractX25519KeyAgreement(didDocument, did) {
   const ka = didDocument.keyAgreement;
@@ -299,6 +356,7 @@ async function postJson(fetchFn, url, body) {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
+    redirect: "manual",
   });
   return parseResponse(resp, url);
 }
@@ -308,6 +366,7 @@ async function postRaw(fetchFn, url, body, contentType) {
     method: "POST",
     headers: { "content-type": contentType },
     body,
+    redirect: "manual",
   });
   return parseResponse(resp, url);
 }
@@ -315,13 +374,23 @@ async function postRaw(fetchFn, url, body, contentType) {
 async function parseResponse(resp, url) {
   const text = await resp.text();
   if (!resp.ok) {
-    throw new Error(`mediator-auth: ${resp.status} ${resp.statusText} from ${url}: ${text.slice(0, 200)}`);
+    throw responseError(`mediator-auth: ${resp.status} from ${url}`, text, resp.status);
   }
   try {
     return JSON.parse(text);
   } catch {
-    throw new Error(`mediator-auth: ${url} returned non-JSON: ${text.slice(0, 200)}`);
+    throw responseError(`mediator-auth: ${url} returned a non-JSON body`, text, resp.status);
   }
+}
+
+// Response content stays out of the message: from a hostile endpoint it
+// is attacker-chosen text, and messages end up in logs and UI. It is kept
+// on `err.body` (and the HTTP status on `err.status`) for debugging.
+function responseError(message, body, status) {
+  const err = new Error(message);
+  if (status !== undefined) err.status = status;
+  err.body = body;
+  return err;
 }
 
 function randomUuid() {

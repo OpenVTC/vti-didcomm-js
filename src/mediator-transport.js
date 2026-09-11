@@ -28,6 +28,7 @@
 
 import { unpack } from "./unpack.js";
 import { pack } from "./pack.js";
+import { assertSafeEndpoint } from "./net-guard.js";
 import * as b64u from "./base64url.js";
 import * as jwk from "./jwk.js";
 
@@ -262,11 +263,32 @@ export class MediatorSession {
    *   neither dispatched nor acked — they stay queued, since nothing has
    *   handled them — and are never run through the DIDComm unpacker (which
    *   cannot read them).
+   * @param {import("./net-guard.js").NetPolicy} [args.netPolicy] - egress
+   *   policy for `mediator.wsEndpoint`, checked here and again before each
+   *   socket open. Defaults to `wss:` on a public host; a local mediator on
+   *   `ws://localhost` needs `{ allowInsecure: true, allowPrivate: true }`.
+   *   Pass the policy given to `authenticateToMediator`.
+   * @throws {import("./net-guard.js").BlockedEndpointError} if
+   *   `mediator.wsEndpoint` fails the policy.
 */
-  constructor({ mediator, mediatorJwt, client, senderKeys, resolveSender, WebSocketImpl, onMessage, onTspFrame, onClose, onError, connectTimeoutMs }) {
+  constructor({ mediator, mediatorJwt, client, senderKeys, resolveSender, WebSocketImpl, onMessage, onTspFrame, onClose, onError, connectTimeoutMs, netPolicy }) {
     if (!mediator?.wsEndpoint) {
       throw new Error("MediatorSession: mediator.wsEndpoint required (mediator advertises no wss endpoint)");
     }
+    if (netPolicy != null && typeof netPolicy !== "object") {
+      throw new TypeError("MediatorSession: netPolicy must be an object");
+    }
+    // `mediator` normally comes from a DID document, and callers can also
+    // build it by hand. The upgrade request carries the mediator JWT, so the
+    // endpoint is checked rather than trusted.
+    this._wsPolicy = {
+      allowInsecure: Boolean(netPolicy?.allowInsecure),
+      allowPrivate: Boolean(netPolicy?.allowPrivate),
+      allowHosts: netPolicy?.allowHosts ?? null,
+      label: "mediator WebSocket",
+      schemes: ["wss:"],
+    };
+    assertSafeEndpoint(mediator.wsEndpoint, this._wsPolicy);
     this.mediator = mediator;
     this.mediatorJwt = mediatorJwt;
     // Upper bound on the WS upgrade. Without it, a silently-dropped
@@ -367,6 +389,11 @@ export class MediatorSession {
         fn(arg);
         return true;
       };
+
+      // Re-check before every dial: `mediator` is a plain object the caller
+      // still holds, so its endpoint may have changed since construction.
+      // Throwing here rejects connect() before any socket exists.
+      assertSafeEndpoint(this.mediator.wsEndpoint, this._wsPolicy);
 
       // Subprotocol bearer: ["bearer.<jwt>", "<app>"]. The mediator
       // reads the JWT from Sec-WebSocket-Protocol when no Authorization
