@@ -9,8 +9,19 @@
 // resolves are stable, so re-resolving them on every operation is pure
 // latency. The cache keys on the DID string and stores only successful
 // resolutions. In-flight resolutions are de-duplicated so concurrent
-// callers share one fetch. did:key / did:peer are cheap+deterministic
-// but cached uniformly (harmless). Tradeoff: a rotated key isn't
+// callers share one fetch.
+//
+// Two things bound the cache, because a client resolves DIDs it did not
+// choose: an inbound frame's `skid` names its own sender, so whoever can
+// route frames to us decides what we try to resolve.
+//   - `maxEntries` (default 500) evicts least-recently-used first.
+//     Map insertion order is the LRU order: a hit re-inserts the entry.
+//   - did:key and did:peer are not cached at all. They resolve from the
+//     identifier itself with no network I/O, so caching them buys
+//     nothing and is the cheap way to flood the cache — a sender can
+//     mint unlimited distinct did:keys for free.
+//
+// Tradeoff: for the methods that are cached, a rotated key isn't
 // observed until the entry expires — set a short TTL or call
 // `invalidate(did)` after a known rotation.
 //
@@ -22,19 +33,6 @@
 // a relaxed policy is served as-is to later callers; a caller that needs
 // the strict policy applied to its own resolution should not share a
 // resolver with one that relaxes it.
-//
-// callers share one fetch.
-// Two things bound it, because a client resolves DIDs it did not
-// choose: an inbound frame's `skid` names its own sender, so whoever
-// can route frames to us decides what we try to resolve.
-//   - `maxEntries` (default 500) evicts least-recently-used first.
-//     Map insertion order is the LRU order: a hit re-inserts the entry.
-//   - did:key and did:peer are not cached at all. They resolve from the
-//     identifier itself with no network I/O, so caching them buys
-//     nothing and is the cheap way to flood the cache — a sender can
-//     mint unlimited distinct did:keys for free.
-// Tradeoff: a rotated key isn't observed until the entry expires — set
-// a short TTL or call `invalidate(did)` after a known rotation.
 
 import * as didKey from "./did-key.js";
 import * as didWebvh from "./did-webvh.js";
