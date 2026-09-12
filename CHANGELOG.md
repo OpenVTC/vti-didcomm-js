@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **CI actions are pinned to commit SHAs** (`# vX.Y.Z` comments record the
+  version each SHA was), the workflow token is `permissions: contents: read`,
+  and `actions/checkout` runs with `persist-credentials: false` so the token
+  is not left in `.git/config` for later steps to read. A tag is mutable, so
+  `@v6` meant "whatever that tag points at when the job runs".
+- **`.github/dependabot.yml`** watches `github-actions` and `npm` weekly, with
+  a 7-day `cooldown` so a freshly published version is not picked up the day
+  it lands.
+
+No shipped-package change (workflow and Dependabot configuration only), hence
+no version bump.
+
 ## [0.9.1] - 2026-09-12
 
 ### Security

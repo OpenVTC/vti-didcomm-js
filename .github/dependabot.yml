@@ -1,0 +1,28 @@
+# Pinned action SHAs and a lockfile only stay current if something
+# proposes the bumps, so both ecosystems are watched weekly.
+#
+# `cooldown` holds a freshly published version back for a week: most
+# compromised-release incidents are caught and yanked within days, and
+# nothing here needs same-day upgrades.
+#
+# Not covered: tools/roundtrip-helper (cargo). It is test-only
+# (`publish = false`) and nothing it builds ships in the npm tarball.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: chore
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: chore
