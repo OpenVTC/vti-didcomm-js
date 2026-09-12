@@ -60,9 +60,12 @@ function clientArgs() {
 }
 
 // Plain-HTTP stand-in for an internal service that happens to speak the
-// mediator auth protocol. Records every request that arrives.
+// mediator auth protocol. Records every request that arrives, and every
+// TCP connection: a socket that is opened and then fails on the response
+// is still a socket the guard should never have let be dialed.
 async function listener(handler = mediatorResponses) {
   const hits = [];
+  let connections = 0;
   const server = createServer((req, res) => {
     const chunks = [];
     req.on("data", (c) => chunks.push(c));
@@ -71,12 +74,18 @@ async function listener(handler = mediatorResponses) {
       handler(req, res);
     });
   });
+  server.on("connection", () => {
+    connections += 1;
+  });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address();
   return {
     hits,
     port,
     origin: `http://127.0.0.1:${port}`,
+    get connections() {
+      return connections;
+    },
     close: () =>
       new Promise((resolve) => {
         server.closeAllConnections?.();
@@ -99,7 +108,207 @@ function mediatorResponses(req, res) {
   }
 }
 
+// ─── the bypass vector set ──────────────────────────────────────────────
+
+// Every host form the SEC-4045 review found a way past a URL-text check,
+// with the reason the guard owes for it. They are all one attack — the
+// mediator document names an internal host and the client dials it —
+// differing only in how the host is spelled, so they live in one table
+// that each entry point below is driven through.
+//
+// The loopback spellings are the live half: `{ loopback: true }` marks a
+// host the WHATWG parser folds onto 127.0.0.1, where the test listener
+// is, so a guard that missed one would really reach it. The rest are
+// unroutable from a test host; they are here because the parse has to
+// refuse them on the spelling alone, with no connect attempt to learn
+// from.
+const VECTORS = [
+  // Special-use names, each also in its root-dot form: `localhost.` is
+  // the same name to a resolver, so the trailing dot has to come off
+  // before the name check rather than after it.
+  ["localhost", "private_name", { loopback: true }],
+  ["localhost.", "private_name", { loopback: true }],
+  ["mediator.localhost", "private_name", { loopback: true }],
+  ["mediator.localhost.", "private_name", { loopback: true }],
+  ["mediator.local", "private_name"],
+  ["mediator.local.", "private_name"],
+  ["mediator.internal", "private_name"],
+  ["mediator.home.arpa", "private_name"],
+  // Loopback, and the alternate IPv4 spellings of it. The parser folds
+  // every one of these onto 127.0.0.1, which is why refusing the dotted
+  // quad on its own is not a control.
+  ["127.0.0.1", "private_address", { loopback: true }],
+  ["127.0.0.1.", "private_address", { loopback: true }],
+  ["127.1", "private_address", { loopback: true }],
+  ["127.0.1", "private_address", { loopback: true }],
+  ["0x7f000001", "private_address", { loopback: true }],
+  ["2130706433", "private_address", { loopback: true }],
+  ["0177.0.0.1", "private_address", { loopback: true }],
+  // IPv4-mapped IPv6, which `didwebvh-ts` and vta-sdk's own
+  // `guard_public_url` both still admit. A mapped address reaches a v4
+  // listener, so this one is live too.
+  ["[::ffff:127.0.0.1]", "private_address", { loopback: true }],
+  ["[::ffff:7f00:1]", "private_address", { loopback: true }],
+  ["[::1]", "private_address"],
+  // Link-local, and the cloud metadata address that makes reaching it
+  // worth the trouble.
+  ["169.254.169.254", "private_address"],
+  ["169.254.0.1", "private_address"],
+  ["[fe80::1]", "private_address"],
+  ["[fd00:ec2::254]", "private_address"],
+  // CGNAT 100.64.0.0/10, including the Alibaba metadata address.
+  ["100.64.0.1", "private_address"],
+  ["100.100.100.200", "private_address"],
+  ["100.127.255.254", "private_address"],
+  // RFC 1918, all three blocks.
+  ["10.0.0.5", "private_address"],
+  ["172.16.0.1", "private_address"],
+  ["172.31.255.254", "private_address"],
+  ["192.168.1.1", "private_address"],
+  // "This network", and the NAT64 / 6to4 wrappers around loopback.
+  ["0.0.0.0", "private_address"],
+  ["[64:ff9b::7f00:1]", "private_address"],
+  ["[2002:7f00:1::]", "private_address"],
+];
+
+const LOOPBACK_VECTORS = VECTORS.filter(([, , flags]) => flags?.loopback);
+
 // ─── authenticateToMediator against a real listener ─────────────────────
+
+// The set is gated in two passes, because the two things worth proving
+// need different instruments and only one of them can be proved with a
+// socket.
+//
+//   1. No vector reaches `fetch` at all. A spy stands in for it, so every
+//      spelling can be driven — including the ones that are unroutable
+//      from a test host — without the test ever being able to leave the
+//      process, whatever state the guard is in.
+//   2. The refusal happens before the dial. That needs a real socket, so
+//      it runs the spellings that fold onto 127.0.0.1 through the real
+//      fetch against the local listener. Those are the live vectors, and
+//      loopback is the furthest a broken guard could get them.
+
+test("authenticateToMediator: no vector in the set reaches fetch", async () => {
+  const did = "did:peer:2.attacker-controlled-mediator";
+  const calls = [];
+  const spy = async (input, init) => {
+    calls.push({ url: String(typeof input === "string" || input instanceof URL ? input : input?.url), init });
+    return new Response("{}", { status: 200 });
+  };
+
+  const outcomes = [];
+  for (const [host, reason] of VECTORS) {
+    // https under the default policy, http under allowInsecure: the host
+    // block is independent of the scheme gate, and neither ordering may
+    // let a host through.
+    for (const [endpoint, opts] of [
+      [`https://${host}:8443`, {}],
+      [`http://${host}:8080`, { netPolicy: { allowInsecure: true } }],
+    ]) {
+      let err;
+      try {
+        await authenticateToMediator({
+          mediatorDid: did,
+          ...clientArgs(),
+          resolve: async () => ({ didDocument: mediatorDoc(did, { endpoints: [endpoint] }) }),
+          fetch: spy,
+          ...opts,
+        });
+      } catch (e) {
+        err = e;
+      }
+      outcomes.push({ endpoint, reason, err });
+    }
+  }
+
+  // Every vector runs before anything is asserted, so this describes the
+  // whole set rather than however far a bail-out on the first one got.
+  assert.deepEqual(
+    calls.map((c) => c.url),
+    [],
+    "the guard must refuse before fetch is reached",
+  );
+  const wrong = outcomes.filter(({ reason, err }) => err?.code !== BLOCKED_ENDPOINT || err.reason !== reason);
+  assert.deepEqual(
+    wrong.map(({ endpoint, reason, err }) => `${endpoint} -> want ${reason}, got ${err?.reason ?? err?.message ?? "resolved"}`),
+    [],
+  );
+});
+
+test("authenticateToMediator: the loopback spellings get zero TCP connections", async () => {
+  const internal = await listener();
+  const did = "did:peer:2.attacker-controlled-mediator";
+  try {
+    const outcomes = [];
+    for (const [host, reason] of LOOPBACK_VECTORS) {
+      // The listener's real port, and the real fetch: if the guard let
+      // one of these through, this is the socket it would open.
+      for (const [endpoint, opts] of [
+        [`https://${host}:${internal.port}`, {}],
+        [`http://${host}:${internal.port}`, { netPolicy: { allowInsecure: true } }],
+      ]) {
+        let err;
+        try {
+          await authenticateToMediator({
+            mediatorDid: did,
+            ...clientArgs(),
+            resolve: async () => ({ didDocument: mediatorDoc(did, { endpoints: [endpoint] }) }),
+            ...opts,
+          });
+        } catch (e) {
+          err = e;
+        }
+        outcomes.push({ endpoint, reason, err });
+      }
+    }
+
+    // The dial is the assertion that matters, and it comes first: a
+    // refusal that happens after the socket is open is not a refusal.
+    // An https endpoint dialed against this plaintext listener dies in
+    // the TLS handshake and never produces a *request*, so the request
+    // count on its own would call that a pass.
+    assert.equal(internal.connections, 0, "no vector may open a socket to the internal listener");
+    assert.equal(internal.hits.length, 0, "no request may reach the internal listener");
+
+    const wrong = outcomes.filter(({ reason, err }) => err?.code !== BLOCKED_ENDPOINT || err.reason !== reason);
+    assert.deepEqual(
+      wrong.map(({ endpoint, reason, err }) => `${endpoint} -> want ${reason}, got ${err?.reason ?? err?.message ?? "resolved"}`),
+      [],
+    );
+  } finally {
+    await internal.close();
+  }
+});
+
+test("authenticateToMediator: every loopback spelling really does reach the listener", async () => {
+  // The refusals above are only worth something if the hosts they refuse
+  // are hosts that work. With allowPrivate set, each spelling completes
+  // the handshake against the internal listener — so each is a live
+  // route to it, and the guard is the only thing in the way.
+  for (const [host] of LOOPBACK_VECTORS) {
+    const internal = await listener();
+    const did = "did:peer:2.local-dev-mediator";
+    try {
+      const result = await authenticateToMediator({
+        mediatorDid: did,
+        ...clientArgs(),
+        resolve: async () => ({
+          didDocument: mediatorDoc(did, { endpoints: [`http://${host}:${internal.port}`] }),
+        }),
+        netPolicy: DEV,
+      });
+      assert.equal(result.accessToken, "a", host);
+      assert.deepEqual(
+        internal.hits.map((h) => `${h.method} ${h.path}`),
+        ["POST /authenticate/challenge", "POST /authenticate"],
+        host,
+      );
+      assert.ok(internal.connections >= 1, `${host} must actually have connected`);
+    } finally {
+      await internal.close();
+    }
+  }
+});
 
 test("authenticateToMediator: a document naming a loopback listener gets zero requests, even with allowInsecure", async () => {
   const internal = await listener();
@@ -184,6 +393,7 @@ test("authenticateToMediator: redirects from the auth endpoint are not followed"
       );
       assert.equal(first.hits.at(-1).path, redirectOn);
       assert.equal(second.hits.length, 0, `redirect target must see no request (${redirectOn})`);
+      assert.equal(second.connections, 0, `redirect target must not be dialed at all (${redirectOn})`);
     } finally {
       await first.close();
       await second.close();
@@ -233,6 +443,28 @@ test("parseMediatorEndpoints mediatorDoc vectors: any non-public endpoint reject
     () => parseMediatorEndpoints(mediatorDoc(did, { endpoints: ["http://mediator.example.com"] }), did),
     /insecure REST endpoint/,
   );
+});
+
+test("parseMediatorEndpoints: the vector set is refused in every egress the document carries", () => {
+  // A document has three places to name a host, and a client that only
+  // vets the first one still dials the other two: the DIDCommMessaging
+  // REST endpoint, the `Authentication` service endpoint (which is where
+  // the challenge and the packed auth message go), and the WebSocket the
+  // transport upgrades to. The REST endpoint is public in each case here,
+  // so the only thing under test is the one that is not.
+  const did = "did:x:m";
+  for (const [host, reason] of VECTORS) {
+    for (const shape of [
+      { endpoints: ["https://m.example/v1"], auth: `https://${host}/authenticate` },
+      { endpoints: ["https://m.example/v1", `wss://${host}/ws`] },
+    ]) {
+      assert.throws(
+        () => parseMediatorEndpoints(mediatorDoc(did, shape), did),
+        blocked(reason),
+        JSON.stringify(shape),
+      );
+    }
+  }
 });
 
 test("parseMediatorEndpoints: allowHosts must cover every advertised endpoint", () => {
