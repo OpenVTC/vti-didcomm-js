@@ -125,8 +125,29 @@ await connectVtaViaMediator({
 `allowInsecure` only permits `http:` / `ws:`; it does not admit private
 hosts. `allowHosts` narrows the policy and never re-admits a blocked
 address. The same `netPolicy` option exists on `authenticateToMediator`,
-`resolveMediator`, `MediatorSession` and VTA REST `authenticate` /
-`refresh`.
+`resolveMediator`, `MediatorSession`, VTA REST `authenticate` /
+`refresh`, and DID resolution.
+
+`did:webvh` resolution is on the same policy, because a webvh
+identifier names the host its log is fetched from — and identifiers
+arrive from elsewhere: an inbound frame's `skid` is resolved before the
+frame is authenticated, so a mediator-routed sender picks a host this
+client would GET. The log URL is checked before `did.jsonl` (and
+`did-witness.json`) is fetched, and so is the host of any nested
+`did:webvh` verification method inside the log:
+
+```js
+// Refused before any request: BlockedEndpointError, reason private_name.
+await resolve(`did:webvh:${scid}:localhost%3A8000`);
+
+// A local webvh server, for development.
+await resolve(did, { netPolicy: { allowInsecure: true, allowPrivate: true } });
+```
+
+A did:webvh host that merely *contains* `localhost` (say
+`localhost.example.com`) is refused too, unless `allowPrivate` is set:
+`didwebvh-ts` treats any such identifier as local and fetches it over
+plaintext `http`.
 
 Browsers expose no DNS API, so a public name that resolves to a private
 address passes the URL check there; `allowHosts` is the strong control. In

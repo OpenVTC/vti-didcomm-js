@@ -13,6 +13,15 @@
 // but cached uniformly (harmless). Tradeoff: a rotated key isn't
 // observed until the entry expires — set a short TTL or call
 // `invalidate(did)` after a known rotation.
+//
+// Per-call `options` reach the method handler unchanged, which is how
+// `netPolicy` gets to did:webvh: `resolve(did, { netPolicy })` decides
+// which hosts that method's `did.jsonl` fetch may reach, and a DID
+// naming a refused host throws before any request. Cached entries key on
+// the DID alone and carry no policy, so a document first resolved under
+// a relaxed policy is served as-is to later callers; a caller that needs
+// the strict policy applied to its own resolution should not share a
+// resolver with one that relaxes it.
 
 import * as didKey from "./did-key.js";
 import * as didWebvh from "./did-webvh.js";
@@ -33,6 +42,8 @@ export const DEFAULT_DID_CACHE_TTL_MS = 5 * 60 * 1000;
  * @param {Object} [overrides] - map of `{ method: resolverModule }`
  *   to merge over the built-in defaults. Each handler must expose
  *   `resolve(did, options)` returning the W3C DID Resolution result.
+ *   `options` is the caller's per-call object, passed through untouched
+ *   — `{ netPolicy }` for did:webvh (see `./net-guard.js`).
  * @param {Object} [config]
  * @param {number} [config.cacheTtlMs] - cache lifetime in ms. `0`
  *   disables caching entirely.
@@ -64,6 +75,8 @@ export function createResolver(overrides = {}, { cacheTtlMs = DEFAULT_DID_CACHE_
         `resolver: no handler for method "${method}"; supported: ${supported}`,
       );
     }
+    // `options` is passed through untouched, so a caller's `netPolicy`
+    // reaches did:webvh and vets the host before it is fetched from.
     return handler.resolve(did, options);
   }
 
@@ -131,6 +144,10 @@ export const defaultResolver = createResolver();
 /**
  * Module-level shortcut: `resolve(did)` is equivalent to
  * `defaultResolver.resolve(did)`.
+ *
+ * @param {string} did
+ * @param {Object} [options] - per-method resolution options, e.g.
+ *   `{ netPolicy }` for did:webvh (see `./net-guard.js`).
  */
 export function resolve(did, options) {
   return defaultResolver.resolve(did, options);
