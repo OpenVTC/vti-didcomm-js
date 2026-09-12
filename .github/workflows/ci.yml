@@ -5,20 +5,37 @@ on:
     branches: [main]
   pull_request:
 
+# Nothing here writes to the repository, so the job token is read-only.
+# A job that needs more has to ask for it explicitly.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      # Every `uses:` is pinned to a commit SHA. A tag is mutable, so
+      # `@v6` means "whatever that tag points at when this job runs" —
+      # whoever can move it can run code in this job with the token
+      # above. The trailing comment is the version the SHA was, and
+      # Dependabot (.github/dependabot.yml) proposes the bumps.
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          # The default leaves the job's token in .git/config, where any
+          # later step — or a dependency's install script — can read it.
+          persist-credentials: false
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: 20
           cache: npm
 
-      - uses: dtolnay/rust-toolchain@stable
+      # dtolnay/rust-toolchain publishes no release tags; `stable` is a
+      # branch. This is that branch's head at the time of pinning, so
+      # bumping it is a deliberate edit rather than a silent one.
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: tools/roundtrip-helper
 
