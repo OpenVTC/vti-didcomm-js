@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-09-12
+
+### Security
+
+- **The DID-resolution cache is bounded.** `resolver.js` expired entries on a
+  TTL but had no size limit, and a client resolves DIDs it did not choose — an
+  inbound frame's `skid` names its own sender — so whoever can route frames to
+  a client decided how much it cached. Two changes bound it:
+  - `createResolver(overrides, { maxEntries })`, default **500**, evicting the
+    least recently used entry first (a cache hit re-inserts, so Map insertion
+    order is the LRU order). Expired entries are dropped first.
+  - **`did:key` and `did:peer` are no longer cached at all.** They resolve from
+    the identifier itself with no network I/O, so caching them saved nothing,
+    and they are free and unlimited to mint — the flooding vector.
+
+### Added
+
+- `resolver.size()` and `didCacheSize()` report the number of cached
+  resolutions, and `DEFAULT_DID_CACHE_MAX_ENTRIES` is exported.
+
+### Changed
+
+- A repeat `did:key` / `did:peer` resolution now re-runs its (offline) handler
+  instead of being served from cache. Nothing observable changes except that a
+  rotated document is never stale for these methods.
+
 ## [0.9.0] - 2026-09-12
 
 **Behaviour change:** `did:webvh` resolution now refuses a non-public host,
