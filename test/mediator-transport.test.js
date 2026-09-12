@@ -771,3 +771,87 @@ test("a TSP frame with no onTspFrame handler is dropped (not run through DIDComm
   // No handler → silently dropped; must NOT be reported as a DIDComm unpack error.
   assert.equal(errors.length, 0);
 });
+
+// ── Egress policy on the WebSocket endpoint ────────────────────────────────
+//
+// The upgrade request carries the mediator JWT, so a session must never open
+// a socket to a host the policy refuses — whether `mediator` came from a DID
+// document or was built by hand.
+
+function spyWebSocket() {
+  const constructed = [];
+  class SpyWebSocket extends FakeWebSocket {
+    constructor(url, protocols) {
+      constructed.push(url);
+      super(url, protocols);
+    }
+  }
+  return { SpyWebSocket, constructed };
+}
+
+function guardedSession(wsEndpoint, extra) {
+  const m = keypairDid();
+  return new MediatorSession({
+    mediator: { did: m.did, kid: m.kid, x25519Pub: m.publicKey, wsEndpoint },
+    mediatorJwt: "med.jwt",
+    client: generateEphemeralClient(),
+    ...extra,
+  });
+}
+
+const blockedEndpoint = (reason) => (err) =>
+  err.code === "E_BLOCKED_ENDPOINT" && (reason === undefined || err.reason === reason);
+
+test("MediatorSession: a non-public wsEndpoint is refused and no WebSocket is constructed", () => {
+  const { SpyWebSocket, constructed } = spyWebSocket();
+  for (const [url, reason] of [
+    ["wss://10.0.0.5/ws", "private_address"],
+    ["wss://127.0.0.1:7037/ws", "private_address"],
+    ["wss://[::ffff:a9fe:a9fe]/ws", "private_address"],
+    ["wss://169.254.169.254/ws", "private_address"],
+    ["wss://mediator.local/ws", "private_name"],
+    ["wss://user:pass@mediator.test/ws", "userinfo"],
+  ]) {
+    assert.throws(() => guardedSession(url, { WebSocketImpl: SpyWebSocket }), blockedEndpoint(reason), url);
+  }
+  assert.equal(constructed.length, 0);
+});
+
+test("MediatorSession: wss only unless allowInsecure, and allowInsecure alone does not admit private hosts", async () => {
+  const { SpyWebSocket, constructed } = spyWebSocket();
+  assert.throws(() => guardedSession("ws://mediator.test/ws", { WebSocketImpl: SpyWebSocket }), blockedEndpoint("scheme"));
+  assert.throws(
+    () => guardedSession("ws://127.0.0.1:7037/ws", { WebSocketImpl: SpyWebSocket, netPolicy: { allowInsecure: true } }),
+    blockedEndpoint("private_address"),
+  );
+  assert.equal(constructed.length, 0);
+
+  guardedSession("ws://mediator.test/ws", { WebSocketImpl: SpyWebSocket, netPolicy: { allowInsecure: true } });
+  const dev = guardedSession("ws://127.0.0.1:7037/ws", {
+    WebSocketImpl: SpyWebSocket,
+    netPolicy: { allowInsecure: true, allowPrivate: true },
+  });
+  await dev.connect();
+  assert.deepEqual(constructed, ["ws://127.0.0.1:7037/ws"]);
+  dev.close();
+});
+
+test("MediatorSession: allowHosts applies to the WebSocket endpoint", () => {
+  const { SpyWebSocket, constructed } = spyWebSocket();
+  const netPolicy = { allowHosts: ["mediator.test"] };
+  assert.throws(
+    () => guardedSession("wss://relay.example.net/ws", { WebSocketImpl: SpyWebSocket, netPolicy }),
+    blockedEndpoint("not_allowlisted"),
+  );
+  guardedSession("wss://mediator.test/ws", { WebSocketImpl: SpyWebSocket, netPolicy });
+  assert.equal(constructed.length, 0, "constructing a session does not open a socket");
+  assert.throws(() => guardedSession("wss://mediator.test/ws", { WebSocketImpl: SpyWebSocket, netPolicy: true }), TypeError);
+});
+
+test("MediatorSession: the endpoint is re-checked before each dial", async () => {
+  const { SpyWebSocket, constructed } = spyWebSocket();
+  const session = guardedSession("wss://mediator.test/ws", { WebSocketImpl: SpyWebSocket });
+  session.mediator.wsEndpoint = "wss://10.0.0.5/ws";
+  await assert.rejects(() => session.connect(), blockedEndpoint("private_address"));
+  assert.equal(constructed.length, 0);
+});

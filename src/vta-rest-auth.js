@@ -35,9 +35,13 @@
 //     mint ephemeral did:keys need to run `pnm acl create` first.
 //   - The VTA's `cors_origins` must include this page's origin.
 //   - Persist the rotated `refreshToken` from each `refresh()` call.
+//   - A local VTA on `http://localhost` needs
+//     `netPolicy: { allowInsecure: true, allowPrivate: true }`; by
+//     default `baseUrl` must be https on a public host.
 
 import { resolve as resolveDid } from "./resolver.js";
 import { pack } from "./pack.js";
+import { assertSafeEndpoint, guardedFetch } from "./net-guard.js";
 import * as multibase from "./multibase.js";
 import * as jwk from "./jwk.js";
 import * as x25519 from "./x25519.js";
@@ -68,7 +72,10 @@ const REFRESH_MESSAGE_TYPE = "https://trusttasks.org/spec/auth/refresh/0.1";
  *   fragment). Defaults to `${clientDid}#${multibase_pub}` which
  *   matches the layout a did:key Ed25519/X25519 resolves to.
  * @param {Function} [args.fetch] - fetch implementation; defaults
- *   to `globalThis.fetch`. Override in tests.
+ *   to `globalThis.fetch`. Override in tests. It must honour
+ *   `redirect: "manual"`.
+ * @param {import("./net-guard.js").NetPolicy} [args.netPolicy] - egress
+ *   policy for `baseUrl`. Defaults to https on a public host.
  * @returns {Promise<{
  *   accessToken: string,
  *   accessExpiresAt: number,
@@ -76,6 +83,8 @@ const REFRESH_MESSAGE_TYPE = "https://trusttasks.org/spec/auth/refresh/0.1";
  *   refreshExpiresAt?: number,
  *   sessionId?: string,
  * }>}
+ * @throws {import("./net-guard.js").BlockedEndpointError} if `baseUrl`
+ *   fails the policy (before any request), or the VTA redirects.
  */
 export async function authenticate({
   baseUrl,
@@ -85,6 +94,7 @@ export async function authenticate({
   clientX25519Public,
   clientKid,
   fetch: customFetch,
+  netPolicy,
 }) {
   assertNonEmptyString("clientDid", clientDid);
   const ctx = buildContext({
@@ -95,6 +105,7 @@ export async function authenticate({
     clientX25519Public,
     clientKid,
     customFetch,
+    netPolicy,
   });
 
   // ── Step 1: request the challenge ────────────────────────────────
@@ -109,9 +120,7 @@ export async function authenticate({
   // Current VTA emits a FLAT `{ challenge, sessionId, expiresAt }`
   // (`ChallengeResponse`) — no `data` envelope.
   if (!challenge?.sessionId || !challenge?.challenge) {
-    throw new Error(
-      `vta-rest-auth: /auth/challenge response missing sessionId or challenge (got ${JSON.stringify(challenge)})`,
-    );
+    throw responseError("vta-rest-auth: /auth/challenge response missing sessionId or challenge", challenge);
   }
 
   // ── Steps 2-4: pack the response message and POST it to /auth/ ────
@@ -143,8 +152,16 @@ export async function authenticate({
  * `refresh_token` in the body, so the sender binding is not load-
  * bearing here — but we still pack to the VTA's keyAgreement.
  *
- * @param {Object} args - same `client*` + `vtaDid` + `baseUrl` shape
- *   as {@link authenticate}, plus:
+ * @param {Object} args - same `client*` + `vtaDid` + `baseUrl` +
+ *   `netPolicy` shape as {@link authenticate}, plus:
+ * @param {string} args.baseUrl
+ * @param {string} args.vtaDid
+ * @param {string} args.clientDid
+ * @param {Uint8Array} args.clientX25519Private
+ * @param {Uint8Array} args.clientX25519Public
+ * @param {string} [args.clientKid]
+ * @param {Function} [args.fetch]
+ * @param {import("./net-guard.js").NetPolicy} [args.netPolicy]
  * @param {string} args.refreshToken - the current refresh token.
  * @returns {Promise<{
  *   accessToken: string,
@@ -163,6 +180,7 @@ export async function refresh({
   clientKid,
   refreshToken,
   fetch: customFetch,
+  netPolicy,
 }) {
   assertNonEmptyString("refreshToken", refreshToken);
   const ctx = buildContext({
@@ -173,6 +191,7 @@ export async function refresh({
     clientX25519Public,
     clientKid,
     customFetch,
+    netPolicy,
   });
 
   const auth = await packAndPost(ctx, {
@@ -223,12 +242,28 @@ function buildContext({
   clientX25519Public,
   clientKid,
   customFetch,
+  netPolicy,
 }) {
   assertNonEmptyString("baseUrl", baseUrl);
   assertNonEmptyString("vtaDid", vtaDid);
   assertNonEmptyString("clientDid", clientDid);
   assertBytes("clientX25519Private", clientX25519Private, 32);
   assertBytes("clientX25519Public", clientX25519Public, 32);
+  if (netPolicy != null && typeof netPolicy !== "object") {
+    throw new TypeError("vta-rest-auth: netPolicy must be an object");
+  }
+
+  // `baseUrl` typically arrives from a QR code or stored config rather
+  // than the caller's own code, so it gets the same egress policy as a
+  // DID-document endpoint, checked before any request is built.
+  const policy = {
+    allowInsecure: Boolean(netPolicy?.allowInsecure),
+    allowPrivate: Boolean(netPolicy?.allowPrivate),
+    allowHosts: netPolicy?.allowHosts ?? null,
+    label: "VTA REST",
+    schemes: ["https:"],
+  };
+  assertSafeEndpoint(baseUrl, policy);
 
   const fetchFn = customFetch ?? globalThis.fetch;
   if (typeof fetchFn !== "function") {
@@ -244,7 +279,8 @@ function buildContext({
     // If the caller didn't supply a kid, assume their public key is the
     // fragment (matches how did:key X25519-only DIDs are structured).
     clientKid: clientKid ?? defaultClientKid(clientDid, clientX25519Public),
-    fetchFn,
+    // Re-checks every request URL and refuses redirects.
+    fetchFn: guardedFetch(fetchFn, policy),
   };
 }
 
@@ -297,9 +333,7 @@ function tokenResult(resp, path) {
   const tokens = resp?.tokens;
   const session = resp?.session;
   if (!tokens?.accessToken) {
-    throw new Error(
-      `vta-rest-auth: ${path} response missing tokens.accessToken (got ${JSON.stringify(resp)})`,
-    );
+    throw responseError(`vta-rest-auth: ${path} response missing tokens.accessToken`, resp);
   }
   const issuedAtEpoch = rfc3339ToEpochSeconds(session?.issuedAt);
   return {
@@ -376,6 +410,7 @@ async function postJson(fetchFn, url, body) {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
+    redirect: "manual",
   });
   return parseResponse(resp, url);
 }
@@ -385,6 +420,7 @@ async function postRaw(fetchFn, url, body, contentType) {
     method: "POST",
     headers: { "content-type": contentType },
     body,
+    redirect: "manual",
   });
   return parseResponse(resp, url);
 }
@@ -392,15 +428,23 @@ async function postRaw(fetchFn, url, body, contentType) {
 async function parseResponse(resp, url) {
   const text = await resp.text();
   if (!resp.ok) {
-    throw new Error(
-      `vta-rest-auth: ${resp.status} ${resp.statusText} from ${url}: ${text.slice(0, 200)}`,
-    );
+    throw responseError(`vta-rest-auth: ${resp.status} from ${url}`, text, resp.status);
   }
   try {
     return JSON.parse(text);
-  } catch (e) {
-    throw new Error(`vta-rest-auth: ${url} returned non-JSON body: ${text.slice(0, 200)}`);
+  } catch {
+    throw responseError(`vta-rest-auth: ${url} returned a non-JSON body`, text, resp.status);
   }
+}
+
+// Response content stays out of the message: it is server-chosen text,
+// and messages end up in logs and UI. It is kept on `err.body` (and the
+// HTTP status on `err.status`) for debugging.
+function responseError(message, body, status) {
+  const err = new Error(message);
+  if (status !== undefined) err.status = status;
+  err.body = body;
+  return err;
 }
 
 function joinUrl(base, path) {

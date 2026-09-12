@@ -38,6 +38,10 @@ import * as jwk from "./jwk.js";
  * @param {string} [args.clientKid]
  * @param {Function} [args.fetch] - fetch impl for mediator auth.
  * @param {Function} [args.WebSocketImpl] - WebSocket ctor.
+ * @param {import("./net-guard.js").NetPolicy} [args.netPolicy] - egress
+ *   policy for the mediator's advertised REST, auth and WebSocket
+ *   endpoints. Defaults to https/wss on public hosts; local development
+ *   needs `{ allowInsecure: true, allowPrivate: true }`.
  * @returns {Promise<VtaMediatorClient>}
  */
 export async function connectVtaViaMediator({
@@ -49,6 +53,7 @@ export async function connectVtaViaMediator({
   clientKid,
   fetch: customFetch,
   WebSocketImpl,
+  netPolicy,
 }) {
   const vta = await resolveX25519KeyAgreement(vtaDid);
   const resolvedClientKid = clientKid ?? defaultClientKid(clientDid, clientX25519Public);
@@ -60,6 +65,7 @@ export async function connectVtaViaMediator({
     clientX25519Public,
     clientKid: resolvedClientKid,
     fetch: customFetch,
+    netPolicy,
   });
 
   // Seed the VTA's keyAgreement so its responses unpack by skid.
@@ -85,6 +91,7 @@ export async function connectVtaViaMediator({
       return { publicJwk: jwk.publicJwk("X25519", x25519Pub) };
     },
     WebSocketImpl,
+    netPolicy,
   });
   await session.connect();
 

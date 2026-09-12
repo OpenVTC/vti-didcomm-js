@@ -355,7 +355,14 @@ test("refresh: surfaces 4xx (e.g. rotated/replayed token)", async () => {
         refreshToken: "stale",
         fetch,
       }),
-    /401.*refresh token not found/,
+    (err) => {
+      assert.match(err.message, /401/);
+      assert.equal(err.status, 401);
+      // The body is kept for debugging, not reflected into the message.
+      assert.match(err.body, /refresh token not found/);
+      assert.doesNotMatch(err.message, /refresh token not found/);
+      return true;
+    },
   );
 });
 
@@ -376,7 +383,13 @@ test("authenticate: rejects 4xx from /auth/challenge", async () => {
         clientX25519Public: client.publicKey,
         fetch,
       }),
-    /403.*DID not in ACL/,
+    (err) => {
+      assert.match(err.message, /403/);
+      assert.equal(err.status, 403);
+      assert.match(err.body, /DID not in ACL/);
+      assert.doesNotMatch(err.message, /DID not in ACL/);
+      return true;
+    },
   );
 });
 
@@ -450,6 +463,86 @@ test("authenticate: errors if fetch is explicitly non-function", async () => {
       }),
     /no fetch implementation/,
   );
+});
+
+// ─── Egress policy on baseUrl ───────────────────────────────────────────
+
+const blockedEndpoint = (reason) => (err) =>
+  err.code === "E_BLOCKED_ENDPOINT" && (reason === undefined || err.reason === reason);
+
+test("authenticate/refresh: a refused baseUrl never reaches fetch", async () => {
+  const vta = buildFakeVta();
+  const client = generateEphemeralClient();
+  const args = {
+    vtaDid: vta.did,
+    clientDid: client.did,
+    clientX25519Private: client.privateKey,
+    clientX25519Public: client.publicKey,
+  };
+  const calls = [];
+  const spy = async (url, init) => {
+    calls.push({ url, init });
+    return new Response("{}", { status: 200 });
+  };
+
+  for (const [baseUrl, netPolicy, reason] of [
+    ["https://127.0.0.1:1", undefined, "private_address"],
+    ["https://[::1]:8100", undefined, "private_address"],
+    ["https://169.254.169.254", undefined, "private_address"],
+    ["https://vta.internal", undefined, "private_name"],
+    ["http://127.0.0.1:8100", { allowInsecure: true }, "private_address"],
+    ["http://vta.test", undefined, "scheme"],
+    ["https://vta.test", { allowHosts: ["vta.example"] }, "not_allowlisted"],
+  ]) {
+    await assert.rejects(
+      () => authenticate({ ...args, baseUrl, netPolicy, fetch: spy }),
+      blockedEndpoint(reason),
+      `authenticate ${baseUrl}`,
+    );
+    await assert.rejects(
+      () => refresh({ ...args, baseUrl, netPolicy, refreshToken: "r", fetch: spy }),
+      blockedEndpoint(reason),
+      `refresh ${baseUrl}`,
+    );
+  }
+  assert.equal(calls.length, 0);
+});
+
+test("authenticate: allowInsecure + allowPrivate admits a local VTA; a redirect is refused", async () => {
+  const vta = buildFakeVta();
+  const client = generateEphemeralClient();
+  const args = {
+    vtaDid: vta.did,
+    clientDid: client.did,
+    clientX25519Private: client.privateKey,
+    clientX25519Public: client.publicKey,
+  };
+
+  const local = "http://127.0.0.1:8100";
+  const { fetch, calls } = mockFetch({
+    baseUrl: local,
+    challengeBody: { challenge: "c", sessionId: "s" },
+    authBody: { session: { id: "s" }, tokens: { accessToken: "ok" } },
+  });
+  const result = await authenticate({
+    ...args,
+    baseUrl: local,
+    fetch,
+    netPolicy: { allowInsecure: true, allowPrivate: true },
+  });
+  assert.equal(result.accessToken, "ok");
+  assert.equal(calls.length, 2);
+
+  const seen = [];
+  const redirecting = async (_url, init) => {
+    seen.push(init.redirect);
+    return new Response(null, { status: 302, headers: { location: "http://127.0.0.1:9/" } });
+  };
+  await assert.rejects(
+    () => authenticate({ ...args, baseUrl: "https://vta.test", fetch: redirecting }),
+    blockedEndpoint("redirect"),
+  );
+  assert.deepEqual(seen, ["manual"]);
 });
 
 // ─── generateEphemeralClient ────────────────────────────────────────────
