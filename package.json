@@ -150,6 +150,6 @@
     "didwebvh-ts": "^2.7.4"
   },
   "devDependencies": {
-    "typescript": "^5.7.0"
+    "typescript": "^7.0.2"
   }
 }
