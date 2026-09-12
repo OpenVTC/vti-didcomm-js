@@ -38,16 +38,25 @@ function blocked(reason) {
 // control tells "dialed" apart from "refused".
 async function listener() {
   const hits = [];
+  let connections = 0;
   const server = createServer((req, res) => {
     hits.push({ method: req.method, path: req.url, host: req.headers.host });
     res.setHeader("content-type", "application/jsonl");
     res.end(`${JSON.stringify(["1-bogus", "2026-01-01T00:00:00Z", {}, { value: {} }])}\n`);
+  });
+  // A socket opened and then abandoned is still a dial the guard should
+  // have refused, and it never shows up as a request.
+  server.on("connection", () => {
+    connections += 1;
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address();
   return {
     hits,
     port,
+    get connections() {
+      return connections;
+    },
     close: () =>
       new Promise((resolve) => {
         server.closeAllConnections?.();
@@ -121,23 +130,68 @@ test("webvhLogUrl: an unusable identifier is rejected, not guessed at", () => {
 
 // ─── resolve() against a real listener ──────────────────────────────────
 
-test("did:webvh resolve: a localhost identifier gets zero requests", async () => {
+test("did:webvh resolve: the whole bypass vector set gets zero TCP connections", async () => {
   const internal = await listener();
   try {
+    // The same bypass table the mediator gate uses, in the spelling a
+    // did:webvh identifier can carry: the host is a DID segment, so the
+    // port is percent-encoded and a bracketed IPv6 literal cannot be
+    // expressed at all (it fails closed instead — see the "unusable
+    // identifier" case above). Each host that folds onto 127.0.0.1
+    // carries the listener's real port, so a vector that got through
+    // would land on it.
+    const port = `%3A${internal.port}`;
+    const outcomes = [];
     for (const [host, reason] of [
-      [`localhost%3A${internal.port}`, "private_name"],
+      // Special-use names, and the root-dot form of each.
+      [`localhost${port}`, "private_name"],
+      [`localhost.${port}`, "private_name"],
+      [`log.localhost${port}`, "private_name"],
+      [`log.localhost.${port}`, "private_name"],
       // The substring case the upstream downgrade turns into plaintext.
-      [`localhost.example%3A${internal.port}`, "private_name"],
-      [`127.0.0.1%3A${internal.port}`, "private_address"],
+      [`localhost.example${port}`, "private_name"],
+      ["log.local", "private_name"],
+      ["log.local.", "private_name"],
+      ["log.internal", "private_name"],
+      ["log.home.arpa", "private_name"],
+      // Loopback, and its alternate IPv4 spellings.
+      [`127.0.0.1${port}`, "private_address"],
+      [`127.0.0.1.${port}`, "private_address"],
+      [`127.1${port}`, "private_address"],
+      [`0x7f000001${port}`, "private_address"],
+      [`2130706433${port}`, "private_address"],
+      [`0177.0.0.1${port}`, "private_address"],
+      // Link-local and cloud metadata, CGNAT, RFC 1918, "this network".
       ["169.254.169.254", "private_address"],
-      ["2130706433", "private_address"],
+      ["100.64.0.1", "private_address"],
+      ["100.100.100.200", "private_address"],
+      ["10.0.0.5", "private_address"],
+      ["172.16.0.1", "private_address"],
+      ["192.168.1.1", "private_address"],
+      ["0.0.0.0", "private_address"],
     ]) {
       const did = `did:webvh:${SCID}:${host}`;
-      await assert.rejects(() => didWebvh.resolve(did), blocked(reason), did);
-      // Through the method dispatcher, the way callers reach it.
-      await assert.rejects(() => resolveDid(did), blocked(reason), did);
+      // Directly, and through the method dispatcher the way callers
+      // reach it — `resolve(did)` is what `unpackInbound` calls on an
+      // unauthenticated frame's `skid`.
+      for (const call of [() => didWebvh.resolve(did), () => resolveDid(did)]) {
+        let err;
+        try {
+          await call();
+        } catch (e) {
+          err = e;
+        }
+        outcomes.push({ did, reason, err });
+      }
     }
+    // The dial first: no vector may get as far as a socket.
+    assert.equal(internal.connections, 0, "no vector may open a socket to the internal listener");
     assert.equal(internal.hits.length, 0, "no request may reach the internal listener");
+    const wrong = outcomes.filter(({ reason, err }) => err?.code !== BLOCKED_ENDPOINT || err.reason !== reason);
+    assert.deepEqual(
+      wrong.map(({ did, reason, err }) => `${did} -> want ${reason}, got ${err?.reason ?? err?.message ?? "resolved"}`),
+      [],
+    );
   } finally {
     await internal.close();
   }
@@ -191,6 +245,7 @@ test("did:webvh resolve: a redirect from an allowed host is not followed", async
       blocked("redirect"),
     );
     assert.equal(target.hits.length, 0, "the redirect target must not be requested");
+    assert.equal(target.connections, 0, "the redirect target must not be dialed at all");
   } finally {
     server.closeAllConnections?.();
     await new Promise((resolve) => server.close(resolve));
