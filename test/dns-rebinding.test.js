@@ -182,13 +182,20 @@ test("DNS rebinding: a mediator endpoint whose name resolves to loopback gets ze
   };
 
   try {
-    await assert.rejects(
-      () => authenticateToMediator({ ...args, fetch: lookupFetch(guardedLookup({ lookup })) }),
-      blocked("private_address"),
-    );
+    // The dial is asserted before the error, so that a guard which let
+    // this through reports the socket it opened rather than only the
+    // rejection it failed to raise.
+    let err;
+    try {
+      await authenticateToMediator({ ...args, fetch: lookupFetch(guardedLookup({ lookup })) });
+    } catch (e) {
+      err = e;
+    }
     assert.equal(internal.connections, 0, "the guard must refuse before the socket is dialed");
     assert.equal(internal.hits.length, 0);
     assert.ok(calls.length > 0, "the name was resolved — the refusal is the address, not a lookup failure");
+    assert.ok(err, "the rebinding endpoint must be refused");
+    blocked("private_address")(err);
 
     // Positive control: nothing but the address check was in the way.
     // The same document, the same policy, the same listener — with the
@@ -209,12 +216,19 @@ test("DNS rebinding: a mediator endpoint whose name resolves to loopback gets ze
 });
 
 test("DNS rebinding: every non-public answer is refused, whichever form it arrives in", async () => {
-  const internal = await listener();
-  const did = "did:peer:2.rebinding-mediator";
-  // One name per case, because a refusal is cached nowhere but the
-  // answer is what varies: loopback, the cloud metadata address, CGNAT,
-  // RFC 1918, and the IPv4-mapped IPv6 spelling of loopback that the
-  // dependencies' own `guard_public_url` still lets through.
+  // The answer classes, driven at the lookup itself rather than through a
+  // socket. Only loopback is safe to let a socket attempt — these answers
+  // are real addresses on a real network, and a guard that stopped
+  // refusing them would have the test dialing a metadata service. Calling
+  // `guardedLookup` directly cannot leave the process at all, whatever
+  // state the guard is in, and the address decision is the whole thing
+  // under test: the end-to-end proof that the decision reaches the socket
+  // is the loopback case above and the did:webvh case below.
+  //
+  // One name per case, because the answer is what varies: loopback, the
+  // cloud metadata address, CGNAT, RFC 1918, and the IPv4-mapped IPv6
+  // spelling of loopback that the dependencies' own `guard_public_url`
+  // still lets through.
   const answers = {
     "a.rebind.test": ["127.0.0.1"],
     "b.rebind.test": ["169.254.169.254"],
@@ -222,32 +236,45 @@ test("DNS rebinding: every non-public answer is refused, whichever form it arriv
     "d.rebind.test": ["10.0.0.5"],
     "e.rebind.test": ["::ffff:127.0.0.1"],
     "f.rebind.test": ["192.168.1.1"],
+    "h.rebind.test": ["172.16.0.1"],
+    "i.rebind.test": ["0.0.0.0"],
+    "j.rebind.test": ["fd00:ec2::254"],
     // A single hostile answer among public ones refuses the whole name:
     // otherwise the socket picks, and it may pick the private one.
     "g.rebind.test": ["93.184.216.34", "127.0.0.1"],
   };
   const { lookup } = stubResolver(answers);
+  const resolveThrough = (impl, hostname, options = {}) =>
+    new Promise((done) => impl(hostname, options, (err, ...rest) => done({ err, rest })));
 
-  try {
-    for (const host of Object.keys(answers)) {
-      const doc = mediatorDoc(did, [`http://${host}:${internal.port}`]);
-      await assert.rejects(
-        () =>
-          authenticateToMediator({
-            mediatorDid: did,
-            ...clientArgs(),
-            resolve: async () => ({ didDocument: doc }),
-            netPolicy: { allowInsecure: true },
-            fetch: lookupFetch(guardedLookup({ lookup })),
-          }),
-        blocked("private_address"),
-        `${host} -> ${answers[host].join(", ")}`,
-      );
-    }
-    assert.equal(internal.connections, 0, "no case may open a socket to the internal listener");
-  } finally {
-    await internal.close();
+  const guarded = guardedLookup({ lookup });
+  const outcomes = [];
+  for (const host of Object.keys(answers)) {
+    outcomes.push({ host, ...(await resolveThrough(guarded, host)) });
   }
+  const wrong = outcomes.filter(({ err }) => err?.code !== BLOCKED_ENDPOINT || err.reason !== "private_address");
+  assert.deepEqual(
+    wrong.map(
+      ({ host, err, rest }) =>
+        `${host} -> ${answers[host].join(", ")}: got ${err?.reason ?? err?.message ?? `addresses ${JSON.stringify(rest)}`}`,
+    ),
+    [],
+  );
+
+  // The name is what is refused, not one address of it: nothing is handed
+  // back for the socket to pick from.
+  for (const { rest } of outcomes) assert.deepEqual(rest, []);
+
+  // Positive control: a wholly public answer passes through untouched, so
+  // the refusals above are the address check and not a broken stub.
+  const { lookup: publicLookup } = stubResolver({ "ok.rebind.test": ["93.184.216.34"] });
+  const ok = await resolveThrough(guardedLookup({ lookup: publicLookup }), "ok.rebind.test");
+  assert.equal(ok.err, null);
+  assert.deepEqual(ok.rest, ["93.184.216.34", 4]);
+  // …and allowPrivate is what a local-development caller opts into.
+  const dev = await resolveThrough(guardedLookup({ lookup, allowPrivate: true }), "a.rebind.test");
+  assert.equal(dev.err, null);
+  assert.deepEqual(dev.rest, ["127.0.0.1", 4]);
 });
 
 // ─── the did:webvh path ─────────────────────────────────────────────────
