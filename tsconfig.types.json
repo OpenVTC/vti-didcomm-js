@@ -5,6 +5,9 @@
     "declaration": true,
     "emitDeclarationOnly": true,
     "outDir": "types",
+    // TypeScript 7 no longer infers this from `include`; without it tsc refuses
+    // to emit rather than guessing the declaration layout (TS5011).
+    "rootDir": "./src",
     "target": "es2022",
     "module": "nodenext",
     "moduleResolution": "nodenext",
