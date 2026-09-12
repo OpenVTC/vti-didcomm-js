@@ -40,7 +40,8 @@ import * as jwk from "./jwk.js";
  * @param {Function} [args.WebSocketImpl] - WebSocket ctor.
  * @param {import("./net-guard.js").NetPolicy} [args.netPolicy] - egress
  *   policy for the mediator's advertised REST, auth and WebSocket
- *   endpoints. Defaults to https/wss on public hosts; local development
+ *   endpoints, and for DID resolution (the VTA's, and any inbound
+ *   sender's). Defaults to https/wss on public hosts; local development
  *   needs `{ allowInsecure: true, allowPrivate: true }`.
  * @returns {Promise<VtaMediatorClient>}
  */
@@ -55,7 +56,7 @@ export async function connectVtaViaMediator({
   WebSocketImpl,
   netPolicy,
 }) {
-  const vta = await resolveX25519KeyAgreement(vtaDid);
+  const vta = await resolveX25519KeyAgreement(vtaDid, { netPolicy });
   const resolvedClientKid = clientKid ?? defaultClientKid(clientDid, clientX25519Public);
 
   const auth = await authenticateToMediator({
@@ -86,8 +87,14 @@ export async function connectVtaViaMediator({
     client,
     senderKeys,
     // Fallback: resolve any unexpected sender's keyAgreement on demand.
+    //
+    // This is the remotely reachable resolution path: the DID comes from
+    // an inbound frame's `skid`, so it is chosen by whoever routed the
+    // frame to us and is resolved before the frame is authenticated. A
+    // did:webvh `skid` would otherwise be a free GET from this client to
+    // a host of the sender's choosing, so `netPolicy` goes with it.
     resolveSender: async (did) => {
-      const { x25519Pub } = await resolveX25519KeyAgreement(did);
+      const { x25519Pub } = await resolveX25519KeyAgreement(did, { netPolicy });
       return { publicJwk: jwk.publicJwk("X25519", x25519Pub) };
     },
     WebSocketImpl,
@@ -186,11 +193,17 @@ export class VtaMediatorClient {
 
 /**
  * Resolve a DID and extract its first X25519 keyAgreement key.
+ *
  * @param {string} did
+ * @param {Object} [options]
+ * @param {import("./net-guard.js").NetPolicy} [options.netPolicy] - egress
+ *   policy for methods that resolve over the network (did:webvh derives
+ *   its log host from the identifier). did:key and did:peer resolve
+ *   offline and ignore it.
  * @returns {Promise<{ kid: string, x25519Pub: Uint8Array }>}
  */
-export async function resolveX25519KeyAgreement(did) {
-  const { didDocument } = await resolveDid(did);
+export async function resolveX25519KeyAgreement(did, { netPolicy } = {}) {
+  const { didDocument } = await resolveDid(did, { netPolicy });
   if (!didDocument || typeof didDocument !== "object") {
     throw new Error(`vta-didcomm: could not resolve a DID document for ${did}`);
   }

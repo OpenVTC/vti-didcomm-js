@@ -7,6 +7,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-12
+
+**Behaviour change:** `did:webvh` resolution now refuses a non-public host,
+and `resolveLog` no longer fetches a witness file. See *Migration*.
+
+### Security
+
+- **did:webvh resolution checks the host before fetching the log.** A webvh
+  identifier names the host its `did.jsonl` is fetched from, and identifiers
+  are not all caller-chosen: `unpackInbound` resolves an inbound frame's
+  `skid` before the frame is authenticated, so any party that can route a
+  frame through the mediator could make a client GET a host of its choosing.
+  `didwebvh-ts` fetched through the global `fetch` with no host check and no
+  way to inject one, so the SDK now does the network I/O itself:
+  - the log URL is computed here, checked with `net-guard` (`https:` on a
+    public host by default) and fetched through `guardedFetch`, so a redirect
+    is refused as well;
+  - `did-witness.json` is fetched the same way when the log declares
+    witnesses, and `witnessProofs` is always passed to `didwebvh-ts` so its
+    own unchecked witness fetch never runs;
+  - every nested `did:webvh` named in a log entry's or witness file's
+    `proof[].verificationMethod` has its host checked **before** the log is
+    handed over, because `didwebvh-ts` resolves those itself and that fetch
+    cannot be intercepted;
+  - each request has a timeout (`timeoutMs`, default 10 s).
+- **The plaintext downgrade is exact-match now.** `didwebvh-ts` picks
+  `http://` whenever an identifier merely *contains* `localhost`, so
+  `did:webvh:<scid>:localhost.attacker.example` was fetched in the clear.
+  Only an exact `localhost` host downgrades, and only when the policy admits
+  private hosts. A did:webvh host containing `localhost` anywhere is refused
+  by default, since upstream would still fetch such a host over plaintext.
+- **`netPolicy` reaches DID resolution.** `resolve(did, { netPolicy })` passes
+  it through `resolver.js` to the method handler, and
+  `connectVtaViaMediator`'s inbound `resolveSender` — the remotely reachable
+  path — resolves under the policy the caller gave it.
+
+### Added
+
+- `didWebvh.webvhLogUrl(did, policy)`: the `did.jsonl` URL an identifier
+  points at, with its host vetted. Exported so the derivation is testable
+  without a network.
+- `didWebvh.resolve` options: `netPolicy`, `fetch`, `timeoutMs`.
+  `didWebvh.resolveLog` options: `netPolicy`, `witnessProofs`, `scid`.
+- `resolveX25519KeyAgreement(did, { netPolicy })`.
+
+### Changed
+
+- `didWebvh.resolveLog` no longer resolves a log that declares witnesses
+  unless `witnessProofs` is supplied: it does no I/O, and upstream would
+  otherwise fetch `did-witness.json` itself, unchecked.
+- `didWebvh.resolve` binds the log to the identifier's SCID (as the upstream
+  `resolveDID` did). A log whose SCID does not match is rejected.
+- A did:webvh identifier with an IPv6-literal-looking host (more than one
+  colon) is refused rather than guessed at.
+
+### Migration
+
+- **Production** webvh DIDs on public `https:` hosts: no change.
+- **A local webvh server** (`did:webvh:<scid>:localhost%3A8000`): pass
+  `{ netPolicy: { allowInsecure: true, allowPrivate: true } }` to
+  `resolve(did, options)`, `didWebvh.resolve` or `createResolver`-backed
+  resolution. `allowPrivate` alone keeps the `https:` requirement.
+- **Handling refusals:** as elsewhere, test `err.code ===
+  "E_BLOCKED_ENDPOINT"`. `err.reason` is `private_name` for a `localhost`
+  host and `private_address` for an IP literal.
+- **`resolveLog` callers** whose logs declare witnesses must now pass
+  `witnessProofs` (or call `resolve(did)`).
+- **An injected `fetch`** for webvh resolution must honour
+  `redirect: "manual"`.
+- Upstream issues, both referenced from `did-webvh.js`: an injectable `fetch`
+  covering all three of `didwebvh-ts`'s egress points
+  (<https://github.com/decentralized-identity/didwebvh-ts/issues/158>) and the
+  substring-`localhost` plaintext downgrade
+  (<https://github.com/decentralized-identity/didwebvh-ts/issues/185>). Once
+  those ship, the nested-verification-method pre-scan and the local URL
+  derivation can go.
+
 ## [0.8.0] - 2026-09-11
 
 **Behaviour change for local development:** `allowInsecure: true` no longer
