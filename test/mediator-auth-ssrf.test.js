@@ -60,9 +60,12 @@ function clientArgs() {
 }
 
 // Plain-HTTP stand-in for an internal service that happens to speak the
-// mediator auth protocol. Records every request that arrives.
+// mediator auth protocol. Records every request that arrives, and every
+// TCP connection: a socket that is opened and then fails on the response
+// is still a socket the guard should never have let be dialed.
 async function listener(handler = mediatorResponses) {
   const hits = [];
+  let connections = 0;
   const server = createServer((req, res) => {
     const chunks = [];
     req.on("data", (c) => chunks.push(c));
@@ -71,12 +74,18 @@ async function listener(handler = mediatorResponses) {
       handler(req, res);
     });
   });
+  server.on("connection", () => {
+    connections += 1;
+  });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address();
   return {
     hits,
     port,
     origin: `http://127.0.0.1:${port}`,
+    get connections() {
+      return connections;
+    },
     close: () =>
       new Promise((resolve) => {
         server.closeAllConnections?.();
