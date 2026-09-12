@@ -175,19 +175,74 @@ const LOOPBACK_VECTORS = VECTORS.filter(([, , flags]) => flags?.loopback);
 
 // ─── authenticateToMediator against a real listener ─────────────────────
 
-test("authenticateToMediator: the whole bypass vector set gets zero TCP connections", async () => {
+// The set is gated in two passes, because the two things worth proving
+// need different instruments and only one of them can be proved with a
+// socket.
+//
+//   1. No vector reaches `fetch` at all. A spy stands in for it, so every
+//      spelling can be driven — including the ones that are unroutable
+//      from a test host — without the test ever being able to leave the
+//      process, whatever state the guard is in.
+//   2. The refusal happens before the dial. That needs a real socket, so
+//      it runs the spellings that fold onto 127.0.0.1 through the real
+//      fetch against the local listener. Those are the live vectors, and
+//      loopback is the furthest a broken guard could get them.
+
+test("authenticateToMediator: no vector in the set reaches fetch", async () => {
+  const did = "did:peer:2.attacker-controlled-mediator";
+  const calls = [];
+  const spy = async (input, init) => {
+    calls.push({ url: String(typeof input === "string" || input instanceof URL ? input : input?.url), init });
+    return new Response("{}", { status: 200 });
+  };
+
+  const outcomes = [];
+  for (const [host, reason] of VECTORS) {
+    // https under the default policy, http under allowInsecure: the host
+    // block is independent of the scheme gate, and neither ordering may
+    // let a host through.
+    for (const [endpoint, opts] of [
+      [`https://${host}:8443`, {}],
+      [`http://${host}:8080`, { netPolicy: { allowInsecure: true } }],
+    ]) {
+      let err;
+      try {
+        await authenticateToMediator({
+          mediatorDid: did,
+          ...clientArgs(),
+          resolve: async () => ({ didDocument: mediatorDoc(did, { endpoints: [endpoint] }) }),
+          fetch: spy,
+          ...opts,
+        });
+      } catch (e) {
+        err = e;
+      }
+      outcomes.push({ endpoint, reason, err });
+    }
+  }
+
+  // Every vector runs before anything is asserted, so this describes the
+  // whole set rather than however far a bail-out on the first one got.
+  assert.deepEqual(
+    calls.map((c) => c.url),
+    [],
+    "the guard must refuse before fetch is reached",
+  );
+  const wrong = outcomes.filter(({ reason, err }) => err?.code !== BLOCKED_ENDPOINT || err.reason !== reason);
+  assert.deepEqual(
+    wrong.map(({ endpoint, reason, err }) => `${endpoint} -> want ${reason}, got ${err?.reason ?? err?.message ?? "resolved"}`),
+    [],
+  );
+});
+
+test("authenticateToMediator: the loopback spellings get zero TCP connections", async () => {
   const internal = await listener();
   const did = "did:peer:2.attacker-controlled-mediator";
   try {
-    // Every vector is run before anything is asserted, so the listener's
-    // counters describe the whole set rather than however far a bail-out
-    // on the first one happened to get.
     const outcomes = [];
-    for (const [host, reason] of VECTORS) {
-      // Both legs carry the listener's real port, so a vector that got
-      // through would land on it. https under the default policy, http
-      // under allowInsecure: the host block is independent of the scheme
-      // gate, and neither ordering may let a host through.
+    for (const [host, reason] of LOOPBACK_VECTORS) {
+      // The listener's real port, and the real fetch: if the guard let
+      // one of these through, this is the socket it would open.
       for (const [endpoint, opts] of [
         [`https://${host}:${internal.port}`, {}],
         [`http://${host}:${internal.port}`, { netPolicy: { allowInsecure: true } }],
@@ -211,11 +266,10 @@ test("authenticateToMediator: the whole bypass vector set gets zero TCP connecti
     // refusal that happens after the socket is open is not a refusal.
     // An https endpoint dialed against this plaintext listener dies in
     // the TLS handshake and never produces a *request*, so the request
-    // count alone would call that a pass.
+    // count on its own would call that a pass.
     assert.equal(internal.connections, 0, "no vector may open a socket to the internal listener");
     assert.equal(internal.hits.length, 0, "no request may reach the internal listener");
 
-    // Then the refusal itself: refused, and refused for the right reason.
     const wrong = outcomes.filter(({ reason, err }) => err?.code !== BLOCKED_ENDPOINT || err.reason !== reason);
     assert.deepEqual(
       wrong.map(({ endpoint, reason, err }) => `${endpoint} -> want ${reason}, got ${err?.reason ?? err?.message ?? "resolved"}`),

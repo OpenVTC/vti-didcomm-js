@@ -130,68 +130,95 @@ test("webvhLogUrl: an unusable identifier is rejected, not guessed at", () => {
 
 // ─── resolve() against a real listener ──────────────────────────────────
 
-test("did:webvh resolve: the whole bypass vector set gets zero TCP connections", async () => {
+// The same bypass table the mediator gate uses, in the spelling a
+// did:webvh identifier can carry: the host is a DID segment, so a port is
+// percent-encoded and a bracketed IPv6 literal cannot be expressed at all
+// (the identifier parse fails closed on one — see the "unusable
+// identifier" case above). `port` marks the hosts that fold onto
+// 127.0.0.1, which are the ones a local listener can catch.
+function webvhVectors(port) {
+  const p = port === undefined ? "" : `%3A${port}`;
+  return [
+    // Special-use names, and the root-dot form of each.
+    [`localhost${p}`, "private_name", { loopback: true }],
+    [`localhost.${p}`, "private_name", { loopback: true }],
+    [`log.localhost${p}`, "private_name", { loopback: true }],
+    [`log.localhost.${p}`, "private_name", { loopback: true }],
+    // The substring case the upstream downgrade turns into plaintext.
+    [`localhost.example${p}`, "private_name"],
+    ["log.local", "private_name"],
+    ["log.local.", "private_name"],
+    ["log.internal", "private_name"],
+    ["log.home.arpa", "private_name"],
+    // Loopback, and its alternate IPv4 spellings.
+    [`127.0.0.1${p}`, "private_address", { loopback: true }],
+    [`127.0.0.1.${p}`, "private_address", { loopback: true }],
+    [`127.1${p}`, "private_address", { loopback: true }],
+    [`0x7f000001${p}`, "private_address", { loopback: true }],
+    [`2130706433${p}`, "private_address", { loopback: true }],
+    [`0177.0.0.1${p}`, "private_address", { loopback: true }],
+    // Link-local and cloud metadata, CGNAT, RFC 1918, "this network".
+    ["169.254.169.254", "private_address"],
+    ["100.64.0.1", "private_address"],
+    ["100.100.100.200", "private_address"],
+    ["10.0.0.5", "private_address"],
+    ["172.16.0.1", "private_address"],
+    ["192.168.1.1", "private_address"],
+    ["0.0.0.0", "private_address"],
+  ];
+}
+
+// Both entry points, because `resolve(did)` through the dispatcher is the
+// one `unpackInbound` reaches for an unauthenticated frame's `skid`.
+async function resolveOutcomes(vectors, options) {
+  const outcomes = [];
+  for (const [host, reason] of vectors) {
+    const did = `did:webvh:${SCID}:${host}`;
+    for (const call of [() => didWebvh.resolve(did, options), () => resolveDid(did, options)]) {
+      let err;
+      try {
+        await call();
+      } catch (e) {
+        err = e;
+      }
+      outcomes.push({ did, reason, err });
+    }
+  }
+  return outcomes;
+}
+
+function wrongOutcomes(outcomes) {
+  return outcomes
+    .filter(({ reason, err }) => err?.code !== BLOCKED_ENDPOINT || err.reason !== reason)
+    .map(({ did, reason, err }) => `${did} -> want ${reason}, got ${err?.reason ?? err?.message ?? "resolved"}`);
+}
+
+// Two passes, as in the mediator gate: a spy proves no vector reaches
+// `fetch` at all — including the spellings that are unroutable from a
+// test host, which is what keeps this hermetic whatever state the guard
+// is in — and the local listener proves that for the live spellings the
+// refusal lands before the socket.
+
+test("did:webvh resolve: no vector in the set reaches fetch", async () => {
+  const calls = [];
+  const spy = async (input) => {
+    calls.push(String(typeof input === "string" || input instanceof URL ? input : input?.url));
+    return new Response("", { status: 200 });
+  };
+  const outcomes = await resolveOutcomes(webvhVectors(8443), { fetch: spy });
+  assert.deepEqual(calls, [], "the guard must refuse before fetch is reached");
+  assert.deepEqual(wrongOutcomes(outcomes), []);
+});
+
+test("did:webvh resolve: the loopback spellings get zero TCP connections", async () => {
   const internal = await listener();
   try {
-    // The same bypass table the mediator gate uses, in the spelling a
-    // did:webvh identifier can carry: the host is a DID segment, so the
-    // port is percent-encoded and a bracketed IPv6 literal cannot be
-    // expressed at all (it fails closed instead — see the "unusable
-    // identifier" case above). Each host that folds onto 127.0.0.1
-    // carries the listener's real port, so a vector that got through
-    // would land on it.
-    const port = `%3A${internal.port}`;
-    const outcomes = [];
-    for (const [host, reason] of [
-      // Special-use names, and the root-dot form of each.
-      [`localhost${port}`, "private_name"],
-      [`localhost.${port}`, "private_name"],
-      [`log.localhost${port}`, "private_name"],
-      [`log.localhost.${port}`, "private_name"],
-      // The substring case the upstream downgrade turns into plaintext.
-      [`localhost.example${port}`, "private_name"],
-      ["log.local", "private_name"],
-      ["log.local.", "private_name"],
-      ["log.internal", "private_name"],
-      ["log.home.arpa", "private_name"],
-      // Loopback, and its alternate IPv4 spellings.
-      [`127.0.0.1${port}`, "private_address"],
-      [`127.0.0.1.${port}`, "private_address"],
-      [`127.1${port}`, "private_address"],
-      [`0x7f000001${port}`, "private_address"],
-      [`2130706433${port}`, "private_address"],
-      [`0177.0.0.1${port}`, "private_address"],
-      // Link-local and cloud metadata, CGNAT, RFC 1918, "this network".
-      ["169.254.169.254", "private_address"],
-      ["100.64.0.1", "private_address"],
-      ["100.100.100.200", "private_address"],
-      ["10.0.0.5", "private_address"],
-      ["172.16.0.1", "private_address"],
-      ["192.168.1.1", "private_address"],
-      ["0.0.0.0", "private_address"],
-    ]) {
-      const did = `did:webvh:${SCID}:${host}`;
-      // Directly, and through the method dispatcher the way callers
-      // reach it — `resolve(did)` is what `unpackInbound` calls on an
-      // unauthenticated frame's `skid`.
-      for (const call of [() => didWebvh.resolve(did), () => resolveDid(did)]) {
-        let err;
-        try {
-          await call();
-        } catch (e) {
-          err = e;
-        }
-        outcomes.push({ did, reason, err });
-      }
-    }
+    const live = webvhVectors(internal.port).filter(([, , flags]) => flags?.loopback);
+    const outcomes = await resolveOutcomes(live);
     // The dial first: no vector may get as far as a socket.
     assert.equal(internal.connections, 0, "no vector may open a socket to the internal listener");
     assert.equal(internal.hits.length, 0, "no request may reach the internal listener");
-    const wrong = outcomes.filter(({ reason, err }) => err?.code !== BLOCKED_ENDPOINT || err.reason !== reason);
-    assert.deepEqual(
-      wrong.map(({ did, reason, err }) => `${did} -> want ${reason}, got ${err?.reason ?? err?.message ?? "resolved"}`),
-      [],
-    );
+    assert.deepEqual(wrongOutcomes(outcomes), []);
   } finally {
     await internal.close();
   }
