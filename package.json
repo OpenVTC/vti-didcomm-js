@@ -146,7 +146,7 @@
     "node": ">=20.0.0"
   },
   "dependencies": {
-    "@noble/curves": "^2.2.0",
+    "@noble/curves": "^2.4.0",
     "didwebvh-ts": "^2.7.4"
   },
   "devDependencies": {
