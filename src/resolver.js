@@ -3,11 +3,11 @@
 // `{ method: resolver }` to add support for additional methods
 // without forking this file.
 //
-// Resolution is cached with a TTL. did:webvh resolution is expensive
-// (an HTTPS `did.jsonl` fetch + full log-chain cryptographic
-// verification); the mediator and VTA DIDs a session resolves are
-// stable, so re-resolving them on every operation is pure latency.
-// The cache keys on the DID string and stores only successful
+// Resolution is cached with a TTL and a size bound. did:webvh
+// resolution is expensive (an HTTPS `did.jsonl` fetch + full log-chain
+// cryptographic verification); the mediator and VTA DIDs a session
+// resolves are stable, so re-resolving them on every operation is pure
+// latency. The cache keys on the DID string and stores only successful
 // resolutions. In-flight resolutions are de-duplicated so concurrent
 // callers share one fetch. did:key / did:peer are cheap+deterministic
 // but cached uniformly (harmless). Tradeoff: a rotated key isn't
@@ -22,6 +22,19 @@
 // a relaxed policy is served as-is to later callers; a caller that needs
 // the strict policy applied to its own resolution should not share a
 // resolver with one that relaxes it.
+//
+// callers share one fetch.
+// Two things bound it, because a client resolves DIDs it did not
+// choose: an inbound frame's `skid` names its own sender, so whoever
+// can route frames to us decides what we try to resolve.
+//   - `maxEntries` (default 500) evicts least-recently-used first.
+//     Map insertion order is the LRU order: a hit re-inserts the entry.
+//   - did:key and did:peer are not cached at all. They resolve from the
+//     identifier itself with no network I/O, so caching them buys
+//     nothing and is the cheap way to flood the cache — a sender can
+//     mint unlimited distinct did:keys for free.
+// Tradeoff: a rotated key isn't observed until the entry expires — set
+// a short TTL or call `invalidate(did)` after a known rotation.
 
 import * as didKey from "./did-key.js";
 import * as didWebvh from "./did-webvh.js";
@@ -36,6 +49,14 @@ const DEFAULT_RESOLVERS = Object.freeze({
 /** Default cache lifetime for a resolved DID document (ms). */
 export const DEFAULT_DID_CACHE_TTL_MS = 5 * 60 * 1000;
 
+/** Default upper bound on cached resolutions. */
+export const DEFAULT_DID_CACHE_MAX_ENTRIES = 500;
+
+// Methods that resolve offline from the identifier itself. Caching them
+// costs memory and saves no I/O, and they are unlimited and free to
+// mint, so they never enter the cache.
+const UNCACHED_METHODS = new Set(["key", "peer"]);
+
 /**
  * Create a DID resolver bound to a specific set of method handlers.
  *
@@ -47,6 +68,9 @@ export const DEFAULT_DID_CACHE_TTL_MS = 5 * 60 * 1000;
  * @param {Object} [config]
  * @param {number} [config.cacheTtlMs] - cache lifetime in ms. `0`
  *   disables caching entirely.
+ * @param {number} [config.maxEntries=500] - upper bound on cached
+ *   resolutions. The least recently used entry is evicted first. `0`
+ *   disables caching entirely.
  * @returns {{
  *   resolve(did: string, options?: Object): Promise<{
  *     didDocument: Object,
@@ -56,15 +80,23 @@ export const DEFAULT_DID_CACHE_TTL_MS = 5 * 60 * 1000;
  *   clearCache(): void,
  *   invalidate(did: string): void,
  *   setCacheTtl(ms: number): void,
+ *   size(): number,
  * }}
  */
-export function createResolver(overrides = {}, { cacheTtlMs = DEFAULT_DID_CACHE_TTL_MS } = {}) {
+export function createResolver(
+  overrides = {},
+  { cacheTtlMs = DEFAULT_DID_CACHE_TTL_MS, maxEntries = DEFAULT_DID_CACHE_MAX_ENTRIES } = {},
+) {
   const handlers = { ...DEFAULT_RESOLVERS, ...overrides };
   /** @type {Map<string, { expires: number, result: Object }>} */
   const cache = new Map();
   /** @type {Map<string, Promise<Object>>} */
   const inflight = new Map();
   let ttl = cacheTtlMs;
+  if (!Number.isFinite(maxEntries) || maxEntries < 0) {
+    throw new TypeError("resolver: maxEntries must be a non-negative number");
+  }
+  const limit = maxEntries;
 
   async function rawResolve(did, options) {
     const method = parseMethod(did);
@@ -87,12 +119,46 @@ export function createResolver(overrides = {}, { cacheTtlMs = DEFAULT_DID_CACHE_
     return Boolean(result && result.didDocument && !result.didResolutionMetadata?.error);
   }
 
+  // Make room for one more entry, dropping expired entries first.
+  // Insertion order is oldest-first, and a cache hit re-inserts, so the
+  // front of the Map is the least recently used entry.
+  function evictFor(now) {
+    for (const [did, entry] of cache) {
+      if (cache.size < limit) return;
+      if (entry.expires <= now) cache.delete(did);
+    }
+    while (cache.size >= limit) {
+      const oldest = cache.keys().next();
+      if (oldest.done) return;
+      cache.delete(oldest.value);
+    }
+  }
+
+  function store(did, result) {
+    const now = Date.now();
+    evictFor(now);
+    cache.set(did, { expires: now + ttl, result });
+  }
+
   async function resolve(did, options) {
-    if (ttl <= 0) return rawResolve(did, options);
+    // `parseMethod` also validates the DID shape, which must happen
+    // whether or not the result is cacheable.
+    const method = parseMethod(did);
+    if (ttl <= 0 || limit === 0 || UNCACHED_METHODS.has(method)) {
+      return rawResolve(did, options);
+    }
 
     const now = Date.now();
     const hit = cache.get(did);
-    if (hit && hit.expires > now) return hit.result;
+    if (hit) {
+      if (hit.expires > now) {
+        // Re-insert so this entry becomes the most recently used.
+        cache.delete(did);
+        cache.set(did, hit);
+        return hit.result;
+      }
+      cache.delete(did);
+    }
 
     // De-dup concurrent resolutions of the same DID into one fetch.
     let pending = inflight.get(did);
@@ -100,7 +166,7 @@ export function createResolver(overrides = {}, { cacheTtlMs = DEFAULT_DID_CACHE_
       pending = rawResolve(did, options)
         .then((result) => {
           if (isCacheable(result)) {
-            cache.set(did, { expires: Date.now() + ttl, result });
+            store(did, result);
           }
           inflight.delete(did);
           return result;
@@ -129,6 +195,10 @@ export function createResolver(overrides = {}, { cacheTtlMs = DEFAULT_DID_CACHE_
     setCacheTtl(ms) {
       ttl = ms;
       if (ttl <= 0) cache.clear();
+    },
+    /** Number of cached resolutions. For tests and diagnostics. */
+    size() {
+      return cache.size;
     },
   };
 }
@@ -166,6 +236,11 @@ export function invalidateDid(did) {
 /** Set the shared default-resolver cache TTL (ms); `0` disables caching. */
 export function setDidCacheTtl(ms) {
   defaultResolver.setCacheTtl(ms);
+}
+
+/** Number of entries in the shared default-resolver cache. */
+export function didCacheSize() {
+  return defaultResolver.size();
 }
 
 function parseMethod(did) {
