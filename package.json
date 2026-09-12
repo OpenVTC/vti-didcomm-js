@@ -147,7 +147,7 @@
   },
   "dependencies": {
     "@noble/curves": "^2.4.0",
-    "didwebvh-ts": "^2.7.4"
+    "didwebvh-ts": "^2.8.0"
   },
   "devDependencies": {
     "typescript": "^7.0.2"
