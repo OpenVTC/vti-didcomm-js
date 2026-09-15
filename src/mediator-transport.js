@@ -30,6 +30,7 @@ import { unpack } from "./unpack.js";
 import { pack } from "./pack.js";
 import { assertSafeEndpoint } from "./net-guard.js";
 import * as b64u from "./base64url.js";
+import { isTspFrameText } from "./tsp-frame.js";
 import * as jwk from "./jwk.js";
 
 const LIVE_DELIVERY_CHANGE_TYPE = "https://didcomm.org/messagepickup/3.0/live-delivery-change";
@@ -300,7 +301,8 @@ export class MediatorSession {
     this.resolveSender = resolveSender;
     this.onMessage = onMessage;
     // Fired for each inbound TSP frame (a non-DIDComm message the mediator
-    // multiplexes onto this same socket — CESR qb2, first byte 0xF8, delivered
+    // multiplexes onto this same socket — CESR qb2, first byte 0xF8 or 0xFB,
+    // delivered
     // as base64url(qb2) text). Receives the raw qb2 bytes; a TSP consumer
     // unpacks them. Awaited before the frame is acked (R1.6) — see
     // `_dispatchTspFrame`. Without a handler, TSP frames are neither dispatched
@@ -535,8 +537,11 @@ export class MediatorSession {
 
   /**
    * Send a raw TSP message as a WS binary frame. The mediator sniffs the
-   * leading 0xF8 magic byte and routes it to its TSP inbound handler (the same
-   * socket carries DIDComm text frames and TSP binary frames).
+   * leading byte — `0xF8` short-framed or `0xFB` long-framed — and routes it to
+   * its TSP inbound handler (the same socket carries DIDComm text frames and
+   * TSP binary frames). Its `affinidi_tsp::is_tsp` and this library's
+   * `isTspFrameBytes` must agree on both, or a message past ~12 KB is dropped
+   * at whichever side lags.
    * @param {Uint8Array} bytes
    */
   sendBinary(bytes) {
@@ -559,12 +564,13 @@ export class MediatorSession {
     }
 
     // TSP demux: the mediator multiplexes TSP messages onto this same socket.
-    // A stored TSP message is delivered as base64url(qb2) text, which starts
-    // with "-E" (the CESR `-E` count code, whose first decoded byte is the
-    // 0xF8 TSP magic). DIDComm frames are JSON (`{`) or compact JWS (`ey…`), so
-    // a leading "-E" is an unambiguous TSP marker. Route the raw qb2 bytes to
-    // the TSP consumer instead of the DIDComm unpacker (which throws on them).
-    if (text.startsWith("-E")) {
+    // A stored TSP message is delivered as base64url(qb2) text whose leading
+    // CESR `-E` count code is what marks it — `-E…` short-framed, `--E…` long-
+    // framed. `isTspFrameText` owns that test and explains both; DIDComm frames
+    // are JSON (`{`) or compact JWS (`ey…`), so neither prefix is ambiguous.
+    // Route the raw qb2 bytes to the TSP consumer instead of the DIDComm
+    // unpacker, which throws on them.
+    if (isTspFrameText(text)) {
       let qb2;
       try {
         qb2 = b64u.decode(text);
@@ -622,9 +628,9 @@ export class MediatorSession {
    *  - **No `isQueued` sender check.** That check exists to avoid acking the
    *    mediator's own status/problem-report frames, which would provoke another
    *    status in an endless loop. The mediator speaks DIDComm JSON to us and
-   *    never emits a `-E` frame of its own, and this transport is key-blind for
-   *    TSP so it could not read a sender anyway. Every `-E` frame is a queued
-   *    message.
+   *    never emits a TSP frame of its own, and this transport is key-blind for
+   *    TSP so it could not read a sender anyway. Every frame `isTspFrameText`
+   *    accepts is a queued message.
    *  - **A throwing consumer is not acked.** `_deliver` swallows an
    *    `onMessage` throw and acks regardless; here a throw means the consumer
    *    did not persist, so the ack is withheld and the mediator redelivers.
