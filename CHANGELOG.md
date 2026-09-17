@@ -21,6 +21,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 No shipped-package change (workflow and Dependabot configuration only), hence
 no version bump.
 
+## [0.10.0] - 2026-09-15
+
+### Fixed
+
+- **A long-framed TSP message was routed to the DIDComm unpacker and lost.**
+  The inbound demux classified TSP by `text.startsWith("-E")`, which is the
+  qb64 spelling of the *short* `-E` count code. Spec Rev 3 widened that count
+  to cover all signable content — the ciphertext included — so any message past
+  4095 quadlets (~12 KB) is framed with the six-byte long count code instead
+  and its text starts `--E`. `"--E…".startsWith("-E")` is false.
+
+  The failure was silent in the worst direction. A TSP frame handed to the
+  DIDComm unpacker throws, is logged as a poison frame, and — because the throw
+  returns before `_dispatchTspFrame` — is **never acked**, so the mediator
+  redelivers it on every reconnect forever while the TSP consumer that wanted
+  it never hears. Nothing could have caught this before Rev 3 existed: Rev 2's
+  `-E` count covered only the envelope header, a couple of dozen quadlets
+  whatever the message size, so it could not produce the frame.
+
+  The mediator's own ingress classifier (`affinidi_tsp::is_tsp`) and the
+  wallet's TSP codec (`@openvtc/vti-tsp-js`'s `isTsp`) were fixed for the same
+  reason on their own branches. All three have to accept both framings, or a
+  large message is dropped at whichever one lags.
+
+### Added
+
+- **`src/tsp-frame.js`** — `isTspFrameText` (qb64, what the demux now calls),
+  `isTspFrameBytes` (qb2, the binary-domain twin), and the two magic bytes
+  `0xF8` / `0xFB`. Exported from the barrel and as the `./tsp-frame` subpath.
+
+  The predicate was one inline `startsWith` before. It is a module now because
+  the rule it encodes is not obvious from the expression, is shared with two
+  implementations in other repositories, and has one deliberate exclusion worth
+  writing down: Rev 2's long form (`-0E…`, from a superseded draft of the CESR
+  v2 tables) is **not** matched, because nothing can emit it — reaching a long
+  count under Rev 2's header-only semantics would take ~12 KB of VIDs in one
+  envelope — and matching it would route to a TSP consumer a frame no TSP
+  implementation produces.
+
+  Reading Rev 2 is unaffected: Rev 2 messages are short-framed and start `-E`
+  exactly as they always did. The framing question and the revision question
+  are independent, and this library answers only the first — it is key-blind
+  for TSP and hands the bytes to a consumer that decides the rest.
+
 ## [0.9.1] - 2026-09-12
 
 ### Security

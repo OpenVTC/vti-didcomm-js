@@ -664,6 +664,36 @@ test("_onFrame routes a '-E' TSP frame (base64url qb2) to onTspFrame as raw byte
   assert.deepEqual(frames[0], qb2);
 });
 
+test("_onFrame routes a long-framed '--E' TSP frame to onTspFrame as raw bytes", async () => {
+  // Rev 3 widened the `-E` count to cover the ciphertext, so a message past
+  // ~12 KB is framed with the six-byte long count code and its qb64 text starts
+  // `--E`, not `-E`. The demux used to test `text.startsWith("-E")`, so every
+  // large Rev 3 message fell through to the DIDComm unpacker, threw, and was
+  // never acked — redelivered forever while the TSP consumer never saw it.
+  //
+  // Head bytes from a real 20 KB message packed by @openvtc/vti-tsp-js 0.3.0.
+  const frames = [];
+  const session = tspSession((bytes) => frames.push(bytes));
+  const qb2 = Uint8Array.from(Buffer.from("fbe100001a3f61348ff80002e010076469643a7765623a61", "hex"));
+  const text = base64url.encode(qb2);
+  assert.ok(text.startsWith("--E"), `expected "--E" prefix, got "${text.slice(0, 4)}"`);
+  assert.equal(text.startsWith("-E"), false, "the prefix the old check looked for");
+  await session._onFrame(text);
+  assert.equal(frames.length, 1, "a long-framed TSP message must reach the TSP consumer");
+  assert.deepEqual(frames[0], qb2);
+});
+
+test("a long-framed TSP frame is acked like any other", async () => {
+  // Routing it is half the fix. The ack is what makes the mediator drop its
+  // copy, so a frame that routes but never acks is still redelivered forever.
+  const session = ackSpySession(() => {});
+  const text = base64url.encode(
+    Uint8Array.from(Buffer.from("fbe100001a3f61348ff80002e010076469643a7765623a61", "hex")),
+  );
+  await session._onFrame(text);
+  assert.equal(session.acked.length, 1, "long-framed TSP frames are acked after handoff");
+});
+
 test("_onFrame does NOT route a DIDComm (JSON) frame to onTspFrame", async () => {
   const frames = [];
   const errors = [];

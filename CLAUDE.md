@@ -45,6 +45,30 @@ Rules that bite hardest here:
   shapes here almost certainly applies to code copied into the plugin/relay;
   land it everywhere in the same change or extract the shared core.
 
+- **A TSP frame is `-E…` *or* `--E…`, and `src/tsp-frame.js` is the only place
+  that may decide.** Spec Rev 3 widened the `-E` count code to cover all
+  signable content, so a message past ~12 KB is framed with the six-byte long
+  count and begins `0xFB` rather than `0xF8` — in qb64, `--E` rather than `-E`.
+  This transport is key-blind for TSP and classifies on that prefix alone, so
+  getting it wrong drops whole messages: the frame falls through to the DIDComm
+  unpacker, throws, is logged as poison, and never reaches the ack, so the
+  mediator redelivers it forever while the consumer never hears. That is the
+  defect 0.10.0 fixed, and it was invisible until Rev 3 existed because Rev 2's
+  count covered only the envelope header and could not reach the long form.
+
+  **This predicate exists three times** — here, in the mediator's
+  `affinidi_tsp::is_tsp`, and in `@openvtc/vti-tsp-js`'s `isTsp` — which is
+  R4.1's situation exactly, and deliberately not solved by sharing code: these
+  are independent implementations of one wire contract and a shared helper
+  would only make them agree on a shared mistake. So a change to what counts as
+  a TSP frame lands in all three, in the same coordinating issue.
+
+  **What breaks it:** testing the prefix anywhere but `isTspFrameText`; matching
+  Rev 2's `-0E…` long form, which nothing can emit; or reading the framing as a
+  revision signal — Rev 2 messages are short-framed and start `-E` exactly as
+  they always did, and which revision a frame carries is the consumer's
+  question, not this library's.
+
 ## Releasing
 
 Consumers install from npm, so **a fix merged here changes nothing for them
