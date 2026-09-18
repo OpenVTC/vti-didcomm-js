@@ -422,7 +422,15 @@ function hostAllowed(host, allowList) {
 }
 
 function isBlockedName(host) {
-  return host === "localhost" || BLOCKED_NAME_SUFFIXES.some((suffix) => host.endsWith(suffix));
+  // A bare single-label host (no dot) is never a public FQDN: it can only be an
+  // internal name (`localhost`, `intranet`, `metadata`, `router`) or a
+  // decimal/hex IP spelling the dotted-quad `parseIpv4` check above didn't
+  // catch. Reject it. The browser wallet's own did:webvh guard already blocks
+  // single-label hosts; this brings the library's name check in line (SEC #15).
+  // Only reached for non-IP-literal hosts (IPv4/IPv6 literals are handled by the
+  // `isBlockedIp` branch before this is called).
+  if (!host.includes(".")) return true;
+  return BLOCKED_NAME_SUFFIXES.some((suffix) => host.endsWith(suffix));
 }
 
 function canonicalHost(hostname) {

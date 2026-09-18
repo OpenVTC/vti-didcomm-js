@@ -111,6 +111,10 @@ test("assertSafeEndpoint names vectors", () => {
     "https://localhost/", "https://LOCALHOST./", "https://localhost../", "https://svc.localhost/",
     "https://printer.local/", "https://kube-dns.kube-system.svc.cluster.local/",
     "https://metadata.google.internal/", "https://router.home.arpa/",
+    // Single-label names (no dot) are never public FQDNs — an internal name the
+    // platform's search list would resolve. Blocked as of SEC #15 (previously an
+    // uncovered gap that the wallet's own guard caught but this library did not).
+    "https://metadata/", "https://intranet/", "https://router/",
   ]) {
     assertBlocked(url, undefined, "private_name");
   }
@@ -120,8 +124,6 @@ test("assertSafeEndpoint names vectors", () => {
   ]) {
     assertAllowed(url);
   }
-  // Not covered yet: single-label names such as https://metadata/ (open
-  // program decision D3). They are resolved by the platform's search list.
 });
 
 test("assertSafeEndpoint scheme vectors: https/wss only by default", () => {

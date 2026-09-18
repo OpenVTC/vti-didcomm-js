@@ -204,7 +204,7 @@ test("parseMediatorEndpoints: throw branches", () => {
   assert.throws(
     () =>
       parseMediatorEndpoints(
-        { id: did, service: [{ id: `${did}#dc`, type: ["DIDCommMessaging"], serviceEndpoint: [{ uri: "https://m/v1" }] }] },
+        { id: did, service: [{ id: `${did}#dc`, type: ["DIDCommMessaging"], serviceEndpoint: [{ uri: "https://m.example/v1" }] }] },
         did,
       ),
     /no keyAgreement/,
@@ -300,7 +300,7 @@ test("authenticateToMediator: full challenge → pack → /authenticate → toke
 test("authenticateToMediator: surfaces a 4xx from /authenticate/challenge", async () => {
   const client = generateEphemeralClient();
   const medKp = x25519.generateKeyPair();
-  const doc = mediatorDoc("did:x:m", { rest: "https://m/v1", x25519Pub: medKp.publicKey });
+  const doc = mediatorDoc("did:x:m", { rest: "https://m.example/v1", x25519Pub: medKp.publicKey });
   await assert.rejects(
     () =>
       authenticateToMediator({
