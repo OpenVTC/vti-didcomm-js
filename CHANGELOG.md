@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Single-label hosts are refused by the endpoint / `did:webvh` net-guard.**
+  `isBlockedName` blocked `localhost` and the `*.localhost` / `*.local` /
+  `*.internal` / `*.home.arpa` suffixes, but not a bare single-label host
+  (`intranet`, `metadata`, `router`) — which is never a public FQDN (the
+  platform's search list resolves it) or is a decimal/hex IP spelling the
+  dotted-quad check misses. A `did:webvh` (or an advertised endpoint) with such
+  a host on a DIDComm resolve path was therefore dialed — a blind-SSRF gap the
+  browser wallet's own `did:webvh` guard already closed but this library did
+  not. Now refused with `reason: "private_name"`. (SEC #15.)
+
 - **CI actions are pinned to commit SHAs** (`# vX.Y.Z` comments record the
   version each SHA was), the workflow token is `permissions: contents: read`,
   and `actions/checkout` runs with `persist-credentials: false` so the token
@@ -18,8 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a 7-day `cooldown` so a freshly published version is not picked up the day
   it lands.
 
-No shipped-package change (workflow and Dependabot configuration only), hence
-no version bump.
+The net-guard fix above is a shipped-package change, so this release bumps to
+**0.10.1** (the CI/Dependabot entries ride along). Consumers
+(pnm-browser-plugin) pick it up once published and their range resolves it.
 
 ## [0.10.0] - 2026-09-15
 

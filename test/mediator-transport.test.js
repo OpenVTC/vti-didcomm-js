@@ -643,7 +643,7 @@ test("inbound: a poison frame is logged via onError and the next good frame stil
 
 function tspSession(onTspFrame, onError) {
   return new MediatorSession({
-    mediator: { wsEndpoint: "wss://m/ws", did: "did:key:zM", kid: "did:key:zM#zM", x25519Pub: new Uint8Array(32) },
+    mediator: { wsEndpoint: "wss://m.example/ws", did: "did:key:zM", kid: "did:key:zM#zM", x25519Pub: new Uint8Array(32) },
     mediatorJwt: "jwt",
     client: { did: "did:key:zC", kid: "did:key:zC#zC", privateKey: new Uint8Array(32), publicKey: new Uint8Array(32) },
     WebSocketImpl: FakeWebSocket,
