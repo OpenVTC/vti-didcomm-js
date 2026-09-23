@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-09-23
+
+### Added
+
+- **The mediator as a Trust-Task counterparty.** An Affinidi mediator serves
+  its `messaging/*` operations surface (statistics, queues, accounts, the
+  traffic monitor) as Trust Tasks addressed to *itself*, and a wallet can send
+  them over the mediator session it already holds. Three kinds of frame come
+  back from the mediator on that socket, and 0.10 handled none of them right:
+
+  - **A reply is now acked.** The mediator stores its reply to a Trust Task in
+    the caller's queue *and* pushes it live; the Rust SDK deletes it on
+    receipt. This transport never acked a frame whose sender is the mediator
+    (to avoid the status ping-pong), so every reply stayed in the caller's
+    receive queue — the queue carrying its mail — and replayed on every
+    reconnect. A mediator frame of the Trust Tasks envelope type that is
+    threaded to a request (`isStoredMediatorReply`) is now acked with the same
+    `sha256(frame)` queue-id as any other. Status and problem-report frames
+    are still never acked.
+  - **A refusal reaches its waiter.** A problem report names the request it
+    refuses in `pthid`, not `thid`, so `waitFor` never matched it and a
+    `permissionDenied` surfaced as a timeout. `threadOf` keys a problem report
+    by its `pthid`. (The mediator threads every refusal since
+    affinidi-messaging-mediator 0.28.26.)
+  - **`onMediatorMessage`**, a new `MediatorSession` option: an unclaimed
+    frame the mediator itself sent — a `messaging/monitor/event` batch, a
+    reply that outlived its waiter — goes here instead of to `onMessage`, so a
+    consumer that persists every `onMessage` delivery before the ack (R1.6)
+    does not write traffic telemetry to storage once a second. Unthreaded
+    mediator frames are also no longer buffered for a late waiter, since none
+    can want one. Without the option, behaviour is unchanged.
+- `threadOf`, `isStoredMediatorReply` and `TRUST_TASK_ENVELOPE_TYPE` are
+  exported.
+
+## [0.10.1] - 2026-09-22
+
 ### Security
 
 - **Single-label hosts are refused by the endpoint / `did:webvh` net-guard.**

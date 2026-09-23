@@ -69,6 +69,19 @@ Rules that bite hardest here:
   they always did, and which revision a frame carries is the consumer's
   question, not this library's.
 
+- **The mediator is also a Trust-Task counterparty, and its frames are three
+  different things.** A wallet can send `messaging/*` operations to the
+  mediator itself over this session. What comes back from the mediator DID:
+  a **reply** (Trust Tasks envelope, threaded by `thid`) is *stored* as well as
+  pushed, so it is acked like mail — `isStoredMediatorReply`; a **refusal** is
+  a problem report threaded by `pthid` and sent on the socket only — never
+  acked, matched by `threadOf`; a **monitor batch** is an envelope with no
+  `thid`, live-only — never acked, never buffered, delivered to
+  `onMediatorMessage`. Status frames remain unacked (the ping-pong below).
+  **What breaks it:** acking every mediator frame (the status loop), acking
+  none (every reply sits in the caller's queue and replays forever — the 0.10
+  behaviour), or keying a problem report by `thid`.
+
 ## Releasing
 
 Consumers install from npm, so **a fix merged here changes nothing for them

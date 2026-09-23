@@ -8,6 +8,8 @@ import {
   unpackInbound,
   MediatorSession,
   LIVE_DELIVERY_CHANGE_TYPE,
+  TRUST_TASK_ENVELOPE_TYPE,
+  threadOf,
 } from "../src/mediator-transport.js";
 import { pack } from "../src/pack.js";
 import { generateEphemeralClient } from "../src/vta-rest-auth.js";
@@ -884,4 +886,145 @@ test("MediatorSession: the endpoint is re-checked before each dial", async () =>
   session.mediator.wsEndpoint = "wss://10.0.0.5/ws";
   await assert.rejects(() => session.connect(), blockedEndpoint("private_address"));
   assert.equal(constructed.length, 0);
+});
+
+// ── The mediator as a Trust-Task counterparty ───────────────────────────────
+//
+// The mediator serves its `messaging/*` operations as Trust Tasks addressed to
+// itself. Three kinds of frame come back from it on the same socket, and each
+// must be handled differently: a *reply* (stored and pushed — must be acked),
+// a *refusal* (a problem report threaded by `pthid` — must reach the waiter),
+// and a *monitor batch* (live-only, unthreaded — never acked, never buffered).
+
+async function mediatorFixture({ onMessage, onMediatorMessage } = {}) {
+  const client = generateEphemeralClient();
+  const mediatorKp = keypairDid();
+  const mediator = {
+    did: mediatorKp.did,
+    kid: mediatorKp.kid,
+    x25519Pub: mediatorKp.publicKey,
+    wsEndpoint: "wss://mediator.test/ws",
+  };
+  const session = new MediatorSession({
+    mediator,
+    mediatorJwt: "med.jwt.token",
+    client,
+    WebSocketImpl: FakeWebSocket,
+    onMessage,
+    onMediatorMessage,
+  });
+  await session.connect();
+  const ws = FakeWebSocket.last;
+  const fromMediator = (message) =>
+    pack({
+      message: { from: mediatorKp.did, to: [client.did], ...message },
+      sender: {
+        kid: mediatorKp.kid,
+        privateJwk: jwk.privateJwk("X25519", mediatorKp.privateKey, mediatorKp.publicKey),
+      },
+      recipient: { kid: client.kid, publicJwk: jwk.publicJwk("X25519", client.publicKey) },
+    });
+  const openAck = async (frame) => {
+    const { unpack } = await import("../src/unpack.js");
+    return unpack(
+      frame,
+      { kid: mediatorKp.kid, privateJwk: jwk.privateJwk("X25519", mediatorKp.privateKey, mediatorKp.publicKey) },
+      { publicJwk: jwk.publicJwk("X25519", client.publicKey) },
+    );
+  };
+  return { session, ws, fromMediator, openAck };
+}
+
+const settle = () => new Promise((r) => setTimeout(r, 100));
+
+test("a mediator's Trust-Task reply is acked, because the mediator stores it", async () => {
+  // Without the ack every reply stays in the caller's receive queue — the
+  // same queue that carries its mail — and replays on every reconnect.
+  const { session, ws, fromMediator, openAck } = await mediatorFixture();
+  const reply = await fromMediator({
+    id: "urn:uuid:reply-1",
+    type: TRUST_TASK_ENVELOPE_TYPE,
+    thid: "urn:uuid:req-1",
+    body: { type: "https://trusttasks.org/spec/messaging/stats/show/0.1#response", payload: {} },
+  });
+  const waiting = session.waitFor("urn:uuid:req-1", 1000);
+  ws.inject(reply);
+  const got = await waiting;
+  assert.equal(got.id, "urn:uuid:reply-1");
+  await settle();
+  assert.equal(ws.sent.length, 2, "live-delivery-change, then the ack");
+  const ack = await openAck(ws.sent[1]);
+  assert.deepEqual(ack.message.body.message_id_list, [await sha256HexUtf8(reply)]);
+  session.close();
+});
+
+test("a monitor batch from the mediator is not acked and not buffered", async () => {
+  // Batches are live-only (never stored), so there is nothing to ack, and
+  // they answer no request, so no waiter can want one.
+  const seen = [];
+  const { session, ws, fromMediator } = await mediatorFixture({ onMediatorMessage: (m) => seen.push(m) });
+  for (let i = 0; i < 3; i++) {
+    ws.inject(
+      await fromMediator({
+        id: `urn:uuid:batch-${i}`,
+        type: TRUST_TASK_ENVELOPE_TYPE,
+        body: { type: "https://trusttasks.org/spec/messaging/monitor/event/0.1", payload: { seq: i + 1 } },
+      }),
+    );
+  }
+  await settle();
+  assert.equal(seen.length, 3);
+  assert.equal(ws.sent.length, 1, "no ack for a live-only batch");
+  assert.equal(session._inbox.length, 0, "unthreaded mediator frames are not buffered");
+  session.close();
+});
+
+test("a problem report threaded by pthid resolves the waiter for the request it refuses", async () => {
+  const { session, ws, fromMediator } = await mediatorFixture();
+  const waiting = session.waitFor("urn:uuid:req-2", 1000);
+  ws.inject(
+    await fromMediator({
+      id: "urn:uuid:pr-1",
+      type: "https://didcomm.org/report-problem/2.0/problem-report",
+      pthid: "urn:uuid:req-2",
+      body: { code: "e.p.permissionDenied", comment: "only an administrator may…" },
+    }),
+  );
+  const got = await waiting;
+  assert.equal(got.id, "urn:uuid:pr-1");
+  await settle();
+  assert.equal(ws.sent.length, 1, "a problem report is sent on the socket, never stored: no ack");
+  session.close();
+});
+
+test("a pthid on anything but a problem report does not claim a waiter", () => {
+  assert.equal(threadOf({ id: "a", type: "x", pthid: "p" }), "a");
+  assert.equal(threadOf({ id: "a", type: "x", thid: "t", pthid: "p" }), "t");
+  assert.equal(
+    threadOf({ id: "a", type: "https://didcomm.org/report-problem/2.0/problem-report", pthid: "p" }),
+    "p",
+  );
+});
+
+test("without onMediatorMessage, a mediator's unsolicited frame still reaches onMessage", async () => {
+  const seen = [];
+  const { session, ws, fromMediator } = await mediatorFixture({ onMessage: (m) => seen.push(m.id) });
+  ws.inject(await fromMediator({ id: "urn:uuid:batch-x", type: TRUST_TASK_ENVELOPE_TYPE, body: {} }));
+  await settle();
+  assert.deepEqual(seen, ["urn:uuid:batch-x"]);
+  session.close();
+});
+
+test("with onMediatorMessage, a mediator frame does not reach onMessage, and a peer's does", async () => {
+  const peer = [];
+  const med = [];
+  const { session, ws, fromMediator } = await mediatorFixture({
+    onMessage: (m) => peer.push(m.id),
+    onMediatorMessage: (m) => med.push(m.id),
+  });
+  ws.inject(await fromMediator({ id: "urn:uuid:stale-reply", type: TRUST_TASK_ENVELOPE_TYPE, thid: "urn:uuid:gone", body: {} }));
+  await settle();
+  assert.deepEqual(med, ["urn:uuid:stale-reply"]);
+  assert.deepEqual(peer, []);
+  session.close();
 });
