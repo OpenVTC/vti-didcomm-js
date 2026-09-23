@@ -41,7 +41,16 @@ export {
 export * as vtaRestAuth from "./vta-rest-auth.js";
 export { buildForward } from "./forward.js";
 export { authenticateToMediator, resolveMediator, parseMediatorEndpoints } from "./mediator-auth.js";
-export { MediatorSession, buildLiveDeliveryChange, buildMessagesReceived, peekSkid, unpackInbound } from "./mediator-transport.js";
+export {
+  MediatorSession,
+  buildLiveDeliveryChange,
+  buildMessagesReceived,
+  peekSkid,
+  unpackInbound,
+  threadOf,
+  isStoredMediatorReply,
+  TRUST_TASK_ENVELOPE_TYPE,
+} from "./mediator-transport.js";
 export {
   isTspFrameText,
   isTspFrameBytes,

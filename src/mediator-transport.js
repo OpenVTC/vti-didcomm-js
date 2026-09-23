@@ -35,6 +35,11 @@ import * as jwk from "./jwk.js";
 
 const LIVE_DELIVERY_CHANGE_TYPE = "https://didcomm.org/messagepickup/3.0/live-delivery-change";
 const MESSAGES_RECEIVED_TYPE = "https://didcomm.org/messagepickup/3.0/messages-received";
+// The Trust Tasks DIDComm binding: a message of this type carries a whole
+// Trust Task document as its body. The mediator answers Trust Tasks addressed
+// to it (its `messaging/*` operations surface) in this envelope.
+const TRUST_TASK_ENVELOPE_TYPE = "https://trusttasks.org/binding/didcomm/0.1/envelope";
+const PROBLEM_REPORT_TYPE = "https://didcomm.org/report-problem/2.0/problem-report";
 
 // A second, application subprotocol offered alongside the bearer one.
 //
@@ -255,6 +260,13 @@ export class MediatorSession {
    *   so an MV3 teardown between handoff and ack cannot lose it (R1.6). Delivery
    *   is at-least-once: a handler must tolerate seeing the same message twice
    *   across a reconnect and dedupe durably on its own side.
+   * @param {(message: Object, thid: string) => void|Promise<void>} [args.onMediatorMessage]
+   *   - called instead of `onMessage` for an unclaimed message whose sender is
+   *   the mediator itself: a `messaging/monitor/event` batch, or a Trust-Task
+   *   reply that arrived after its waiter gave up. These are the mediator's
+   *   own frames, not mail from a peer, so a consumer that persists every
+   *   `onMessage` delivery before the ack (R1.6) can keep them off that path.
+   *   Without it they reach `onMessage`, as they always have.
    * @param {(bytes: Uint8Array) => void|Promise<void>} [args.onTspFrame] - called
    *   for each inbound TSP frame (raw qb2 bytes), which the mediator multiplexes
    *   onto this same socket. **Awaited before the frame is acked**, exactly as
@@ -272,7 +284,7 @@ export class MediatorSession {
    * @throws {import("./net-guard.js").BlockedEndpointError} if
    *   `mediator.wsEndpoint` fails the policy.
 */
-  constructor({ mediator, mediatorJwt, client, senderKeys, resolveSender, WebSocketImpl, onMessage, onTspFrame, onClose, onError, connectTimeoutMs, netPolicy }) {
+  constructor({ mediator, mediatorJwt, client, senderKeys, resolveSender, WebSocketImpl, onMessage, onMediatorMessage, onTspFrame, onClose, onError, connectTimeoutMs, netPolicy }) {
     if (!mediator?.wsEndpoint) {
       throw new Error("MediatorSession: mediator.wsEndpoint required (mediator advertises no wss endpoint)");
     }
@@ -300,6 +312,11 @@ export class MediatorSession {
     this.senderKeys = senderKeys ?? new Map();
     this.resolveSender = resolveSender;
     this.onMessage = onMessage;
+    // Unsolicited frames the *mediator itself* sent (a traffic-monitor batch,
+    // a stale reply whose waiter gave up). Given, they go here instead of to
+    // `onMessage`, so a consumer that persists everything `onMessage` sees
+    // before the ack does not write telemetry to storage once a second.
+    this.onMediatorMessage = onMediatorMessage;
     // Fired for each inbound TSP frame (a non-DIDComm message the mediator
     // multiplexes onto this same socket — CESR qb2, first byte 0xF8 or 0xFB,
     // delivered
@@ -687,8 +704,15 @@ export class MediatorSession {
     //      queued messages: don't ack them (acking one provokes another status
     //      reply, which is also from the mediator — an endless ~300ms loop) and
     //      don't dedup them. Filtering by sender breaks that loop.
+    //   3. …with one exception: the mediator's *reply to a Trust Task* is
+    //      stored in our queue as well as pushed live (the Rust SDK deletes it
+    //      on receipt), so it is a queued message and must be acked, or every
+    //      reply stays in our receive queue and is replayed on each reconnect.
+    //      That queue is the one carrying every other message to this DID, and
+    //      a full queue refuses them. See `isStoredMediatorReply`.
     const senderDid = result.senderKid ? result.senderKid.split("#")[0] : null;
-    const isQueued = senderDid && senderDid !== this.mediator.did;
+    const fromMediator = senderDid === this.mediator.did;
+    const isQueued = Boolean(senderDid) && (!fromMediator || isStoredMediatorReply(result.message));
 
     // For a queued message, the mediator queue-id doubles as the ack id and the
     // dedup key.
@@ -718,28 +742,37 @@ export class MediatorSession {
    * asynchronously completes before the caller acks (R1.6).
    */
   async _deliver(result) {
-    const thid = result.message.thid ?? result.message.id;
+    const message = result.message;
+    const thid = threadOf(message);
     const idx = this._waiters.findIndex((w) => w.thid === thid);
     if (idx >= 0) {
       const [w] = this._waiters.splice(idx, 1);
       clearTimeout(w.timer);
-      w.resolve(result.message);
+      w.resolve(message);
       return;
     }
+    const senderDid = result.senderKid ? result.senderKid.split("#")[0] : null;
+    const fromMediator = senderDid === this.mediator.did;
+    const listener = fromMediator && this.onMediatorMessage ? this.onMediatorMessage : this.onMessage;
     // Buffer for a not-yet-registered waiter, but bound the buffer so a
     // chatty/malicious mediator can't grow it without limit in a long-lived
-    // tab. Drop the oldest when over the cap.
-    this._inbox.push({ thid, message: result.message });
-    if (this._inbox.length > MAX_INBOX) this._inbox.shift();
+    // tab. Drop the oldest when over the cap. A frame the mediator sends
+    // unthreaded (a traffic-monitor batch, once a second) answers nothing, so
+    // no waiter can want it — buffering it would only evict the raced replies
+    // the buffer exists for.
+    if (!(fromMediator && message.thid == null && message.pthid == null)) {
+      this._inbox.push({ thid, message });
+      if (this._inbox.length > MAX_INBOX) this._inbox.shift();
+    }
     // Surface unsolicited inbound (server-initiated requests) to a listener, if
     // one is registered. Buffering above is preserved so a late `waitFor` for a
     // raced reply still finds it; the listener should filter by message `type`.
-    if (this.onMessage) {
+    if (listener) {
       try {
         // Await so a listener returning a promise (e.g. persist-to-storage)
         // finishes before we ack. A synchronous listener returns undefined and
         // `await` resolves immediately.
-        await this.onMessage(result.message, thid);
+        await listener(message, thid);
       } catch {
         // A throwing listener must not break frame processing.
       }
@@ -788,8 +821,10 @@ export class MediatorSession {
   }
 
   /**
-   * Wait for the first inbound message whose `thid` matches `thid`.
-   * Checks already-buffered frames first.
+   * Wait for the first inbound message answering `thid`: a reply threaded to
+   * it, or a problem report whose `pthid` names it (see `threadOf`), so a
+   * refusal arrives as the refusal instead of as a timeout. Checks
+   * already-buffered frames first.
    *
    * @param {string} thid - the request message id we're correlating to.
    * @param {number} timeoutMs
@@ -831,7 +866,41 @@ export class MediatorSession {
   }
 }
 
-export { LIVE_DELIVERY_CHANGE_TYPE };
+export { LIVE_DELIVERY_CHANGE_TYPE, TRUST_TASK_ENVELOPE_TYPE };
+
+/**
+ * The thread a message answers — what a `waitFor` waiter is keyed by.
+ *
+ * A reply names its request in `thid`. A **problem report** names it in
+ * `pthid` instead (DIDComm: the report opens its own thread, whose parent is
+ * the one that failed), so a refusal matches the request it refuses rather
+ * than timing out as "no response". Anything else falls back to its own id.
+ *
+ * @param {{id?: string, type?: string, thid?: string, pthid?: string}} message
+ * @returns {string}
+ */
+export function threadOf(message) {
+  if (message.thid != null) return message.thid;
+  if (message.type === PROBLEM_REPORT_TYPE && message.pthid != null) return message.pthid;
+  return message.id;
+}
+
+/**
+ * Whether a frame the mediator sent us is its stored reply to a Trust Task.
+ *
+ * The mediator answers a Trust Task addressed to it in the Trust Tasks
+ * envelope, threaded to the request, and **stores** that reply in our queue as
+ * well as pushing it live — so, unlike its status and problem-report frames
+ * (sent on the socket only), it has to be acked. The other envelope frame it
+ * sends, a traffic-monitor batch, is never stored and carries no `thid`, which
+ * is what tells the two apart: a batch answers no request.
+ *
+ * @param {{type?: string, thid?: string}} message
+ * @returns {boolean}
+ */
+export function isStoredMediatorReply(message) {
+  return message.type === TRUST_TASK_ENVELOPE_TYPE && message.thid != null;
+}
 
 function randomUuid() {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
