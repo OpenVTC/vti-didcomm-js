@@ -7,11 +7,15 @@
 //!   "jwe": "<the full JWE JSON string>",
 //!   "recipient_kid": "did:example:recipient#x",
 //!   "recipient_private_x_b64u": "<base64url 32-byte X25519 scalar>",
-//!   "sender_public_x_b64u": "<base64url 32-byte X25519 public key>"
+//!   "sender_public_x_b64u": "<base64url 32-byte X25519 public key>",
+//!   "sender_kid": "did:example:sender#x"
 //! }
 //! ```
 //!
-//! Calls `affinidi-messaging-didcomm::unpack` (the same code path
+//! `sender_kid` is optional: it is the key id `sender_public_x_b64u` belongs
+//! to, and defaults to the JWE's own `skid`.
+//!
+//! Calls `affinidi-messaging-didcomm::unpack_bound` (the same code path
 //! the VTA's DIDComm router uses) and emits one of:
 //!
 //! ```json
@@ -31,7 +35,9 @@
 use std::io::{self, Read, Write};
 
 use affinidi_crypto::jose::key_agreement::{Curve, PrivateKeyAgreement, PublicKeyAgreement};
-use affinidi_messaging_didcomm::message::unpack::{UnpackResult, unpack};
+use affinidi_messaging_didcomm::SenderKey;
+use affinidi_messaging_didcomm::jwe::decrypt::authcrypt_sender_kid;
+use affinidi_messaging_didcomm::message::unpack::{UnpackResult, unpack_bound};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::Deserialize;
@@ -47,6 +53,10 @@ struct Request {
     /// the authcrypt sender key to match.
     #[serde(default)]
     sender_public_x_b64u: Option<String>,
+    /// The key id `sender_public_x_b64u` is the key of. Defaults to the
+    /// JWE's `skid`, which is the key id the harness packs under.
+    #[serde(default)]
+    sender_kid: Option<String>,
     /// Key-agreement curve for the recipient/sender keys. Defaults to
     /// X25519 for backwards compatibility. For "P-256" the
     /// recipient_private bytes are the 32-byte scalar and the
@@ -120,14 +130,26 @@ fn run() -> Result<String, String> {
     };
 
     // The unpack call itself — every failure here lands in the
-    // structured response, not a non-zero exit.
-    let result = unpack(
-        &req.jwe,
-        Some(&req.recipient_kid),
-        Some(&recipient_private),
-        sender_public.as_ref(),
-        /* signer_public */ None,
-    );
+    // structured response, not a non-zero exit. The sender key is bound
+    // to a key id, which the library requires to be the JWE's `skid`.
+    let sender_kid = match (&req.sender_kid, &sender_public) {
+        (Some(kid), _) => Ok(Some(kid.clone())),
+        (None, Some(_)) => authcrypt_sender_kid(&req.jwe),
+        (None, None) => Ok(None),
+    };
+    let result = sender_kid.and_then(|sender_kid| {
+        let sender = match (sender_kid.as_deref(), sender_public.as_ref()) {
+            (Some(kid), Some(public)) => Some(SenderKey::new(kid, public)),
+            _ => None,
+        };
+        unpack_bound(
+            &req.jwe,
+            Some(&req.recipient_kid),
+            Some(&recipient_private),
+            sender,
+            /* signer */ None,
+        )
+    });
 
     let envelope: Value = match result {
         Ok(UnpackResult::Encrypted {
@@ -135,14 +157,11 @@ fn run() -> Result<String, String> {
             authenticated,
             sender_kid,
             recipient_kid,
-            // 0.15 additions. `legacy_kek_used` reports whether the
-            // pre-#322 (unprefixed cc_tag) KEK was needed to unwrap — it
-            // should be `false` for a JS ≥0.5.0 spec-correct pack, which is
-            // exactly the interop this harness checks. The rest are only
-            // meaningful for signed/nested envelopes we don't emit here.
-            legacy_kek_used,
-            non_repudiation: _,
-            signer_kid: _,
+            // The rest (`non_repudiation`, `signer_kid`) are only
+            // meaningful for signed/nested envelopes we don't emit here;
+            // `legacy_kek_used` is deprecated and always false, since the
+            // pre-#322 KEK is no longer accepted at all.
+            ..
         }) => {
             let plaintext = message_to_json(&message)?;
             json!({
@@ -152,7 +171,6 @@ fn run() -> Result<String, String> {
                 "authenticated": authenticated,
                 "sender_kid": sender_kid,
                 "recipient_kid": recipient_kid,
-                "legacy_kek_used": legacy_kek_used,
             })
         }
         Ok(UnpackResult::Signed {
