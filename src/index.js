@@ -25,7 +25,7 @@ export * as aes from "./aes.js";
 export * as a256cbcHs512 from "./a256cbc-hs512.js";
 export { pack } from "./pack.js";
 export { packAnoncrypt } from "./anoncrypt.js";
-export { unpack } from "./unpack.js";
+export { unpack, SenderMismatchError, E_SENDER_MISMATCH, didOfKid } from "./unpack.js";
 export * as didKey from "./did-key.js";
 export * as didWebvh from "./did-webvh.js";
 export * as didPeer from "./did-peer.js";
@@ -47,6 +47,7 @@ export {
   buildMessagesReceived,
   peekSkid,
   unpackInbound,
+  E_UNAUTHENTICATED_FRAME,
   threadOf,
   isStoredMediatorReply,
   TRUST_TASK_ENVELOPE_TYPE,
@@ -57,6 +58,11 @@ export {
   TSP_MAGIC_BYTE,
   TSP_MAGIC_BYTE_LONG,
 } from "./tsp-frame.js";
-export { connectVtaViaMediator, VtaMediatorClient, resolveX25519KeyAgreement } from "./vta-didcomm.js";
+export {
+  connectVtaViaMediator,
+  VtaMediatorClient,
+  resolveX25519KeyAgreement,
+  resolveX25519KeyAgreementKey,
+} from "./vta-didcomm.js";
 export * as netGuard from "./net-guard.js";
 export { BlockedEndpointError, BLOCKED_ENDPOINT } from "./net-guard.js";

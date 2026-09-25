@@ -72,11 +72,32 @@ const jwe = await pack({
   recipient: { kid: recipientKid, publicJwk  },
 });
 
-const { message, senderKid, authenticated } = await unpack(jwe, {
+const { message, senderDid, senderKid, authenticated } = await unpack(jwe, {
   kid: recipientKid,
   privateJwk: recipientPrivateJwk,
 }, { publicJwk: senderPublicJwk });
 ```
+
+### Who sent it: `senderDid`, not `from`
+
+Authorise on **`senderDid`** — the DID of the key (`skid`) the authcrypt
+envelope was authenticated with, given that `senderPublicJwk` was resolved
+from that DID. `message.from` is a value the sender writes into the
+plaintext and is **not** an identity:
+
+- **authcrypt** — `unpack` refuses (`SenderMismatchError`,
+  `code: "E_SENDER_MISMATCH"`) any message whose `from` is missing or is not
+  exactly `senderDid`, so a sender can only speak as the DID whose key it
+  holds.
+- **anoncrypt** — nothing is authenticated; `senderDid` and `senderKid` are
+  `null` whatever `from` claims.
+
+`MediatorSession` hands the same proven identity to its consumers as a
+`VerifiedSender` (`{ did, kid }`): `onMessage(message, thid, sender)`,
+`onMediatorMessage(message, thid, sender)`, and `waitFor(thid, timeoutMs,
+{ from })`, which resolves `{ message, sender }` and — given `from` — only
+accepts a reply authenticated as that DID (or one of those DIDs). A thread id
+is not a secret, so pass `from` whenever you know who should answer.
 
 Higher-level helpers:
 

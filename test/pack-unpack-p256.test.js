@@ -90,7 +90,8 @@ test("P-256 anoncrypt: JS pack → JS unpack round-trips", async () => {
   const out = await unpack(jwe, { kid: recipient.kid, privateJwk: recipient.priv });
   assert.deepEqual(out.message, message);
   assert.equal(out.authenticated, false);
-  assert.equal(out.senderKid, undefined);
+  assert.equal(out.senderKid, null);
+  assert.equal(out.senderDid, null, "anoncrypt has no sender, whatever `from` says");
 });
 
 test("P-256 authcrypt: wrong recipient private key fails to decrypt", async () => {
