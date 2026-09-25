@@ -26,7 +26,7 @@
 // protected header and pick the matching sender public key from a
 // seeded map (mediator + VTA), falling back to DID resolution.
 
-import { unpack } from "./unpack.js";
+import { unpack, didOfKid, E_SENDER_MISMATCH } from "./unpack.js";
 import { pack } from "./pack.js";
 import { assertSafeEndpoint } from "./net-guard.js";
 import * as b64u from "./base64url.js";
@@ -203,38 +203,81 @@ export function peekSkid(jweString) {
 }
 
 /**
- * Unpack an inbound mediator frame, picking the sender's public key by
- * its `skid`.
+ * Stable code for a frame that decrypted but carries no authenticated sender
+ * (anoncrypt, whatever its header claims). Permanent: redelivery cannot fix it.
+ */
+export const E_UNAUTHENTICATED_FRAME = "E_UNAUTHENTICATED_FRAME";
+
+/**
+ * Codes of frames that decrypted for us and were then refused for good. They
+ * are acked (and logged) rather than left queued, since the mediator would
+ * otherwise redeliver them on every reconnect and they would occupy the queue.
+ */
+const PERMANENTLY_REFUSED = new Set([E_SENDER_MISMATCH, E_UNAUTHENTICATED_FRAME]);
+
+/** Resolve a possibly-relative key id (`#key-1`) against `did`. */
+function absoluteKid(did, kid) {
+  return typeof kid === "string" && kid.startsWith("#") ? `${did}${kid}` : kid;
+}
+
+/**
+ * The key among `entry` whose id is exactly `skid`, or undefined.
+ *
+ * @param {Object|Object[]|undefined} entry - `{ kid, publicJwk }` or a list.
+ * @param {string} did
+ * @param {string} skid
+ */
+function keyForSkid(entry, did, skid) {
+  const list = Array.isArray(entry) ? entry : entry ? [entry] : [];
+  return list.find((k) => k?.publicJwk && absoluteKid(did, k.kid) === skid);
+}
+
+/**
+ * Unpack an inbound mediator frame, using the sender key named by its `skid`.
+ *
+ * The key is selected by the **exact** `skid` key id, not merely by its DID,
+ * so the `senderKid` this returns is the key the envelope was actually
+ * authenticated with — not a claim beside a key chosen some other way.
  *
  * @param {string} frameString - the raw JWE text frame.
  * @param {Object} args
  * @param {Object} args.recipient - `{ kid, privateJwk }` (our X25519 key).
- * @param {Map<string,Object>} args.senderKeys - map of sender DID
- *   (the part before `#`) → `{ publicJwk }`. Seeded with the mediator
- *   and VTA keys.
+ * @param {Map<string, {kid: string, publicJwk: Object} | Array<{kid: string, publicJwk: Object}>>} args.senderKeys
+ *   - map of sender DID → its key-agreement key(s), each with its full key
+ *   id. Seeded with the mediator and VTA keys. An entry without a `kid`
+ *   matches nothing.
  * @param {Function} [args.resolveSender] - async fallback
- *   `(did) => { publicJwk }` when `skid`'s DID isn't in `senderKeys`.
- *   It must return a key-agreement key **of that DID**: the sender is
- *   authenticated as `senderDid` only because the envelope decrypts under
- *   a key that DID's document publishes.
+ *   `(did, skid) => { kid, publicJwk } | Array<{ kid, publicJwk }>` when no
+ *   seeded key has id `skid`. It must return key-agreement keys **of that
+ *   DID** (from its DID document): the sender is authenticated as `senderDid`
+ *   only because the envelope decrypts under a key that DID publishes.
  * @returns {Promise<{ message: Object, senderKid: string, senderDid: string, authenticated: true, legacyKekUsed: boolean }>}
  *   `senderDid` is the authenticated sender; `message.from` has been
  *   checked equal to it (see `unpack`).
+ * @throws with `code` {@link E_SENDER_MISMATCH} or
+ *   {@link E_UNAUTHENTICATED_FRAME} for a frame that decrypted and is refused.
  */
 export async function unpackInbound(frameString, { recipient, senderKeys, resolveSender }) {
   const skid = peekSkid(frameString);
   if (!skid) {
     throw new Error("mediator-transport: inbound frame has no skid (anoncrypt not supported)");
   }
-  const senderDid = skid.split("#")[0];
-  let sender = senderKeys.get(senderDid);
+  const senderDid = didOfKid(skid);
+  let sender = keyForSkid(senderKeys.get(senderDid), senderDid, skid);
   if (!sender && typeof resolveSender === "function") {
-    sender = await resolveSender(senderDid);
+    sender = keyForSkid(await resolveSender(senderDid, skid), senderDid, skid);
   }
   if (!sender) {
-    throw new Error(`mediator-transport: no sender key for ${senderDid} (skid ${skid})`);
+    throw new Error(`mediator-transport: no key ${skid} for sender ${senderDid}`);
   }
-  return unpack(frameString, recipient, sender);
+  const result = await unpack(frameString, recipient, sender);
+  if (!result.authenticated) {
+    // An anoncrypt frame carrying a `skid` header: nothing authenticated it.
+    const err = new Error("mediator-transport: inbound frame is not sender-authenticated");
+    err.code = E_UNAUTHENTICATED_FRAME;
+    throw err;
+  }
+  return result;
 }
 
 /**
@@ -373,6 +416,7 @@ export class MediatorSession {
     }
     // Seed the mediator's own key so status/problem-report frames unpack.
     this.senderKeys.set(mediator.did, {
+      kid: mediator.kid,
       publicJwk: jwk.publicJwk("X25519", mediator.x25519Pub),
     });
 
@@ -638,9 +682,22 @@ export class MediatorSession {
         resolveSender: this.resolveSender,
       });
     } catch (err) {
+      if (PERMANENTLY_REFUSED.has(err?.code) && peekSkid(text)?.split("#")[0] !== this.mediator.did) {
+        // Decrypted for us and refused for good (a `from` that is not the
+        // sender key's DID, or no authenticated sender). Nothing is delivered;
+        // the frame is acked so the mediator stops redelivering it, and
+        // logged so it is not silent.
+        this._reportFrameError("accept inbound frame (refused and dropped)", err, text);
+        const queueId = await sha256Hex(text);
+        this._markSeen(queueId);
+        void this._ackReceived(queueId);
+        return;
+      }
       // Unparseable / undecryptable / unknown-sender frame. Log (so a
       // recurring poison message is visible rather than silently dropped)
       // and move on — correlation only cares about responses we await.
+      // Not acked: a failure here may be transient (a sender DID that would
+      // not resolve), and redelivery is how it recovers.
       this._reportFrameError("unpack inbound frame", err, text);
       return;
     }

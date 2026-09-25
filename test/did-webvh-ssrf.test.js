@@ -14,7 +14,7 @@ import { createServer } from "node:http";
 
 import * as didWebvh from "../src/did-webvh.js";
 import { resolve as resolveDid } from "../src/resolver.js";
-import { resolveX25519KeyAgreement } from "../src/vta-didcomm.js";
+import { resolveX25519KeyAgreementKey } from "../src/vta-didcomm.js";
 import { unpackInbound } from "../src/mediator-transport.js";
 import { pack } from "../src/pack.js";
 import { generateEphemeralClient } from "../src/vta-rest-auth.js";
@@ -378,9 +378,9 @@ test("unpackInbound: a webvh skid on an internal host is refused, and netPolicy 
 
     // The resolveSender that `connectVtaViaMediator` installs, under the
     // default policy.
-    const resolveSender = (netPolicy) => async (did) => {
-      const { x25519Pub } = await resolveX25519KeyAgreement(did, { netPolicy });
-      return { publicJwk: jwk.publicJwk("X25519", x25519Pub) };
+    const resolveSender = (netPolicy) => async (did, skid) => {
+      const { kid, x25519Pub } = await resolveX25519KeyAgreementKey(did, skid, { netPolicy });
+      return { kid, publicJwk: jwk.publicJwk("X25519", x25519Pub) };
     };
 
     await assert.rejects(

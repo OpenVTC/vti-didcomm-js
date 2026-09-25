@@ -75,7 +75,7 @@ test("VtaMediatorClient.sendAndWait: emits forward, resolves on thid-correlated 
       privateKey: client.privateKey,
       publicKey: client.publicKey,
     },
-    senderKeys: new Map([[vta.did, { publicJwk: jwk.publicJwk("X25519", vta.publicKey) }]]),
+    senderKeys: new Map([[vta.did, { kid: vta.kid, publicJwk: jwk.publicJwk("X25519", vta.publicKey) }]]),
     WebSocketImpl: FakeWebSocket,
   });
   await session.connect();

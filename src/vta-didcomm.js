@@ -71,7 +71,7 @@ export async function connectVtaViaMediator({
 
   // Seed the VTA's keyAgreement so its responses unpack by skid.
   const senderKeys = new Map([
-    [vtaDid, { publicJwk: jwk.publicJwk("X25519", vta.x25519Pub) }],
+    [vtaDid, { kid: vta.kid, publicJwk: jwk.publicJwk("X25519", vta.x25519Pub) }],
   ]);
 
   const client = {
@@ -93,9 +93,9 @@ export async function connectVtaViaMediator({
     // frame to us and is resolved before the frame is authenticated. A
     // did:webvh `skid` would otherwise be a free GET from this client to
     // a host of the sender's choosing, so `netPolicy` goes with it.
-    resolveSender: async (did) => {
-      const { x25519Pub } = await resolveX25519KeyAgreement(did, { netPolicy });
-      return { publicJwk: jwk.publicJwk("X25519", x25519Pub) };
+    resolveSender: async (did, skid) => {
+      const { kid, x25519Pub } = await resolveX25519KeyAgreementKey(did, skid, { netPolicy });
+      return { kid, publicJwk: jwk.publicJwk("X25519", x25519Pub) };
     },
     WebSocketImpl,
     netPolicy,
@@ -230,6 +230,42 @@ export async function resolveX25519KeyAgreement(did, { netPolicy } = {}) {
     );
   }
   return { kid: vm.id, x25519Pub: key };
+}
+
+/**
+ * Resolve a DID and return the X25519 keyAgreement key whose id is exactly
+ * `kid` — the key an inbound `skid` names. Refuses a key the DID lists, but
+ * not under `keyAgreement`.
+ *
+ * @param {string} did
+ * @param {string} kid - absolute key id (`did#fragment`).
+ * @param {Object} [options]
+ * @param {import("./net-guard.js").NetPolicy} [options.netPolicy]
+ * @returns {Promise<{kid: string, x25519Pub: Uint8Array}>}
+ */
+export async function resolveX25519KeyAgreementKey(did, kid, { netPolicy } = {}) {
+  const { didDocument } = await resolveDid(did, { netPolicy });
+  if (!didDocument || typeof didDocument !== "object") {
+    throw new Error(`vta-didcomm: could not resolve a DID document for ${did}`);
+  }
+  const abs = (id) => (typeof id === "string" && id.startsWith("#") ? `${did}${id}` : id);
+  const methods = didDocument.verificationMethod ?? [];
+  let vm;
+  for (const entry of didDocument.keyAgreement ?? []) {
+    const id = abs(typeof entry === "string" ? entry : entry?.id);
+    if (id !== kid) continue;
+    vm = typeof entry === "string" ? methods.find((v) => abs(v.id) === kid) : entry;
+    break;
+  }
+  if (!vm) throw new Error(`vta-didcomm: ${did} lists no keyAgreement key ${kid}`);
+  if (!vm.publicKeyMultibase) {
+    throw new Error("vta-didcomm: keyAgreement entry has no publicKeyMultibase");
+  }
+  const { codec, key } = multibase.decodeMultikey(vm.publicKeyMultibase);
+  if (codec[0] !== 0xec || codec[1] !== 0x01) {
+    throw new Error("vta-didcomm: keyAgreement key is not X25519");
+  }
+  return { kid, x25519Pub: key };
 }
 
 function defaultClientKid(did, x25519Public) {

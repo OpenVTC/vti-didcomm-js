@@ -95,8 +95,8 @@ test("unpackInbound: dispatches by skid to the right sender key", async () => {
   const med = generateEphemeralClient();
 
   const senderKeys = new Map([
-    [vta.did, { publicJwk: jwk.publicJwk("X25519", vta.publicKey) }],
-    [med.did, { publicJwk: jwk.publicJwk("X25519", med.publicKey) }],
+    [vta.did, { kid: vta.kid, publicJwk: jwk.publicJwk("X25519", vta.publicKey) }],
+    [med.did, { kid: med.kid, publicJwk: jwk.publicJwk("X25519", med.publicKey) }],
   ]);
   const recipient = {
     kid: me.kid,
@@ -131,7 +131,7 @@ test("unpackInbound: errors on unknown sender (no key, no resolver)", async () =
         recipient: { kid: me.kid, privateJwk: jwk.privateJwk("X25519", me.privateKey, me.publicKey) },
         senderKeys: new Map(),
       }),
-    /no sender key/,
+    /no key .* for sender/,
   );
 });
 
@@ -150,7 +150,7 @@ test("MediatorSession: connect sends live-delivery-change; waitFor resolves on m
     mediator,
     mediatorJwt: "med.jwt.token",
     client,
-    senderKeys: new Map([[vta.did, { publicJwk: jwk.publicJwk("X25519", vta.publicKey) }]]),
+    senderKeys: new Map([[vta.did, { kid: vta.kid, publicJwk: jwk.publicJwk("X25519", vta.publicKey) }]]),
     WebSocketImpl: FakeWebSocket,
   });
 
@@ -228,7 +228,7 @@ test("MediatorSession: acks delivered messages with sha256(packed-JWE) so the me
     mediator,
     mediatorJwt: "med.jwt.token",
     client,
-    senderKeys: new Map([[vta.did, { publicJwk: jwk.publicJwk("X25519", vta.publicKey) }]]),
+    senderKeys: new Map([[vta.did, { kid: vta.kid, publicJwk: jwk.publicJwk("X25519", vta.publicKey) }]]),
     WebSocketImpl: FakeWebSocket,
     onMessage: (msg) => received.push(msg),
   });
@@ -349,7 +349,7 @@ test("MediatorSession: hands the message to onMessage BEFORE acking, and awaits 
     mediator,
     mediatorJwt: "med.jwt.token",
     client,
-    senderKeys: new Map([[vta.did, { publicJwk: jwk.publicJwk("X25519", vta.publicKey) }]]),
+    senderKeys: new Map([[vta.did, { kid: vta.kid, publicJwk: jwk.publicJwk("X25519", vta.publicKey) }]]),
     WebSocketImpl: FakeWebSocket,
     // Simulate a consumer that persists asynchronously before returning.
     onMessage: async () => {
@@ -407,7 +407,7 @@ test("MediatorSession: dedups an at-least-once redelivery — handler fires once
     mediator,
     mediatorJwt: "med.jwt.token",
     client,
-    senderKeys: new Map([[vta.did, { publicJwk: jwk.publicJwk("X25519", vta.publicKey) }]]),
+    senderKeys: new Map([[vta.did, { kid: vta.kid, publicJwk: jwk.publicJwk("X25519", vta.publicKey) }]]),
     WebSocketImpl: FakeWebSocket,
     onMessage: (msg) => received.push(msg),
   });
@@ -614,7 +614,7 @@ test("inbound: a poison frame is logged via onError and the next good frame stil
     mediator,
     mediatorJwt: "med.jwt.token",
     client,
-    senderKeys: new Map([[vta.did, { publicJwk: jwk.publicJwk("X25519", vta.publicKey) }]]),
+    senderKeys: new Map([[vta.did, { kid: vta.kid, publicJwk: jwk.publicJwk("X25519", vta.publicKey) }]]),
     WebSocketImpl: FakeWebSocket,
     onError: (err) => errors.push(err),
   });

@@ -34,11 +34,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   returns `senderDid` too.
 - `VtaMediatorClient.sendAndWait` only accepts a reply authenticated as the
   VTA it addressed. Its return value (the message) is unchanged.
+- **The sender key is selected by the exact `skid`.** `unpackInbound` used to
+  pick a key by the `skid`'s DID alone, so the `senderKid` it reported was the
+  header's claim beside a key chosen another way. `senderKeys` entries (a
+  `{ kid, publicJwk }` or a list of them) now match only on `kid === skid`
+  (a relative `#fragment` resolves against the DID; an entry with no `kid`
+  matches nothing), and `resolveSender` is called as `(did, skid)` and held
+  to the same rule. `connectVtaViaMediator` resolves the named key with the new
+  `resolveX25519KeyAgreementKey(did, kid)`, which requires it to be listed
+  under `keyAgreement`. `MediatorSession` seeds the mediator's key with its
+  `kid`.
+- **A frame that decrypts and is then refused for good is acked and dropped.**
+  An authcrypt frame failing the `from` binding (`E_SENDER_MISMATCH`), or an
+  anoncrypt frame that carries a `skid` (`E_UNAUTHENTICATED_FRAME`, new), is
+  reported to `onError` ("refused and dropped") and acked, so the mediator
+  stops redelivering it and it does not occupy the queue. Frames that fail
+  to unpack for any other reason — which may be transient — are still left
+  queued.
 
 ### Added
 
-- `SenderMismatchError`, `E_SENDER_MISMATCH` and `didOfKid` exports; the
-  `VerifiedSender` and `InboundMessage` types.
+- `SenderMismatchError`, `E_SENDER_MISMATCH`, `E_UNAUTHENTICATED_FRAME`,
+  `didOfKid` and `resolveX25519KeyAgreementKey` exports; the `VerifiedSender`
+  and `InboundMessage` types.
 
 ### Migration
 
@@ -47,6 +65,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Authorise on the listener's `sender.did` (or `unpack`'s `senderDid`), not
   on `message.from`.
 - Authcrypt fixtures must carry `from` equal to the sender key's DID.
+- Give every `senderKeys` entry its full key id:
+  `senderKeys.set(did, { kid, publicJwk })`, and have a `resolveSender` take
+  `(did, skid)` and return the key whose id is `skid`.
 
 ## [0.11.0] - 2026-09-23
 
