@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Tests
+
+- The Rust round-trip helper (`tools/roundtrip-helper`) is on
+  `affinidi-messaging-didcomm` 0.15.9 and unpacks through `unpack_bound`,
+  binding the sender key to a key id (an optional `sender_kid` in the request,
+  defaulting to the JWE's `skid`). Its response no longer carries
+  `legacy_kek_used`.
+
 ## [0.12.0] - 2026-09-25
 
 ### Changed (breaking)
