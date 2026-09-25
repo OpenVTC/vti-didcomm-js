@@ -134,7 +134,9 @@ export class VtaMediatorClient {
    * @param {string} type - the DIDComm message `type` (operation URI).
    * @param {Object} body - the request body.
    * @param {number} [timeoutMs=30000]
-   * @returns {Promise<Object>} the unpacked response message.
+   * @returns {Promise<Object>} the unpacked response message — one whose
+   *   envelope authenticated it as `vtaDid`; a reply on the thread from any
+   *   other sender is not accepted as the answer.
    */
   async sendAndWait(type, body, timeoutMs = 30000) {
     const id = `urn:uuid:${randomUuid()}`;
@@ -179,9 +181,10 @@ export class VtaMediatorClient {
     // 3. send + await the response correlated by thid == inner.id.
     //    Register the waiter BEFORE sending to avoid a race where the
     //    response arrives before waitFor is called.
-    const waiter = this.session.waitFor(id, timeoutMs);
+    //    Only a reply authenticated as the VTA answers this request.
+    const waiter = this.session.waitFor(id, timeoutMs, { from: this.vtaDid });
     this.session.send(forwardJwe);
-    return waiter;
+    return (await waiter).message;
   }
 
   close() {

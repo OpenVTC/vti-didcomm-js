@@ -216,7 +216,7 @@ test("pack handles realistic-size message (1 KB body)", async () => {
   const sender = makeParty("did:key:zSender#x");
   const recipient = makeParty("did:key:zRecipient#x");
   const body = { data: "x".repeat(1024) };
-  const message = { id: "m", type: "x", body };
+  const message = { id: "m", type: "x", from: "did:key:zSender", body };
   const jwe = await pack({
     message,
     sender: { kid: sender.kid, privateJwk: sender.privateJwk },

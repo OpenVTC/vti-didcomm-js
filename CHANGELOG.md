@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-09-25
+
+### Changed (breaking)
+
+- **An authcrypt message's `from` must be the DID of its `skid`.** `unpack`
+  already required `apu == skid`, which pins the sender *key*; nothing tied
+  that key to the `from` the plaintext carries, and consumers read `from`.
+  `unpack` now throws `SenderMismatchError` (`code: "E_SENDER_MISMATCH"`) for
+  an authcrypt message whose `from` is missing, is a DID URL, or names any DID
+  other than the `skid`'s. DIDComm v2 requires both properties of a
+  well-formed authcrypt message, so a conforming sender is unaffected. Through
+  `MediatorSession` such a frame is reported to `onError` and not acked, like
+  any other frame that fails to unpack.
+- **`unpack` returns `senderDid`** (the DID of `skid`) beside `senderKid`, and
+  for **anoncrypt both are `null`** (previously `senderKid` was `undefined`).
+  `senderDid` is the identity to authorise on; `message.from` is documented as
+  sender-asserted plaintext.
+- **`MediatorSession` passes the verified sender to consumers.**
+  `onMessage` and `onMediatorMessage` receive a third argument, a frozen
+  `VerifiedSender` `{ did, kid }`. **`waitFor` now resolves
+  `{ message, sender }`** instead of the bare message, and takes an optional
+  third argument `{ from }` — a DID or list of DIDs — restricting which
+  authenticated sender may answer the thread; a message on the thread from
+  anyone else is left for other waiters and the listener. `unpackInbound`
+  returns `senderDid` too.
+- `VtaMediatorClient.sendAndWait` only accepts a reply authenticated as the
+  VTA it addressed. Its return value (the message) is unchanged.
+
+### Added
+
+- `SenderMismatchError`, `E_SENDER_MISMATCH` and `didOfKid` exports; the
+  `VerifiedSender` and `InboundMessage` types.
+
+### Migration
+
+- `const m = await session.waitFor(thid, ms)` →
+  `const { message: m, sender } = await session.waitFor(thid, ms, { from: expectedDid })`.
+- Authorise on the listener's `sender.did` (or `unpack`'s `senderDid`), not
+  on `message.from`.
+- Authcrypt fixtures must carry `from` equal to the sender key's DID.
+
 ## [0.11.0] - 2026-09-23
 
 ### Added

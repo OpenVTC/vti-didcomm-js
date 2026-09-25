@@ -191,8 +191,9 @@ test("MediatorSession: connect sends live-delivery-change; waitFor resolves on m
 
   const waiter = session.waitFor(reqId, 2000);
   ws.inject(responseJwe);
-  const response = await waiter;
+  const { message: response, sender } = await waiter;
   assert.equal(response.thid, reqId);
+  assert.deepEqual(sender, { did: vta.did, kid: vta.kid }, "the waiter is told who sent it");
   assert.deepEqual(response.body.capabilities, ["a", "b"]);
 
   session.close();
@@ -635,7 +636,7 @@ test("inbound: a poison frame is logged via onError and the next good frame stil
   });
   ws.inject(good);
 
-  const msg = await waiting;
+  const { message: msg } = await waiting;
   assert.equal(msg.body.ok, true, "the good frame after two poison frames still resolves");
   assert.ok(errors.length >= 2, `both poison frames were logged (got ${errors.length})`);
   assert.match(errors[0].message, /failed to (unpack|dispatch) inbound/);
@@ -949,7 +950,7 @@ test("a mediator's Trust-Task reply is acked, because the mediator stores it", a
   });
   const waiting = session.waitFor("urn:uuid:req-1", 1000);
   ws.inject(reply);
-  const got = await waiting;
+  const { message: got } = await waiting;
   assert.equal(got.id, "urn:uuid:reply-1");
   await settle();
   assert.equal(ws.sent.length, 2, "live-delivery-change, then the ack");
@@ -990,7 +991,7 @@ test("a problem report threaded by pthid resolves the waiter for the request it 
       body: { code: "e.p.permissionDenied", comment: "only an administrator may…" },
     }),
   );
-  const got = await waiting;
+  const { message: got } = await waiting;
   assert.equal(got.id, "urn:uuid:pr-1");
   await settle();
   assert.equal(ws.sent.length, 1, "a problem report is sent on the socket, never stored: no ack");

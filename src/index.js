@@ -25,7 +25,7 @@ export * as aes from "./aes.js";
 export * as a256cbcHs512 from "./a256cbc-hs512.js";
 export { pack } from "./pack.js";
 export { packAnoncrypt } from "./anoncrypt.js";
-export { unpack } from "./unpack.js";
+export { unpack, SenderMismatchError, E_SENDER_MISMATCH, didOfKid } from "./unpack.js";
 export * as didKey from "./did-key.js";
 export * as didWebvh from "./did-webvh.js";
 export * as didPeer from "./did-peer.js";

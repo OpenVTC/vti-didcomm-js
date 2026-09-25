@@ -97,7 +97,7 @@ async function packLegacy({ message, sender, recipient }) {
 test("spec-correct authcrypt unpacks without the legacy fallback", async () => {
   const sender = makeParty("did:key:zSender#x25519-1");
   const recipient = makeParty("did:key:zRecipient#x25519-1");
-  const message = { id: "m1", type: "x", body: { hello: "spec" } };
+  const message = { id: "m1", type: "x", from: "did:key:zSender", body: { hello: "spec" } };
 
   const jwe = await pack({
     message,
@@ -118,7 +118,7 @@ test("spec-correct authcrypt unpacks without the legacy fallback", async () => {
 test("legacy (pre-0.5) authcrypt decrypts via the fallback", async () => {
   const sender = makeParty("did:key:zSenderLegacy#x25519-1");
   const recipient = makeParty("did:key:zRecipientLegacy#x25519-1");
-  const message = { id: "m2", type: "x", body: { hello: "legacy" } };
+  const message = { id: "m2", type: "x", from: "did:key:zSenderLegacy", body: { hello: "legacy" } };
 
   const jwe = await packLegacy({
     message,

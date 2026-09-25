@@ -214,7 +214,12 @@ export function peekSkid(jweString) {
  *   and VTA keys.
  * @param {Function} [args.resolveSender] - async fallback
  *   `(did) => { publicJwk }` when `skid`'s DID isn't in `senderKeys`.
- * @returns {Promise<{ message: Object, senderKid: string }>}
+ *   It must return a key-agreement key **of that DID**: the sender is
+ *   authenticated as `senderDid` only because the envelope decrypts under
+ *   a key that DID's document publishes.
+ * @returns {Promise<{ message: Object, senderKid: string, senderDid: string, authenticated: true, legacyKekUsed: boolean }>}
+ *   `senderDid` is the authenticated sender; `message.from` has been
+ *   checked equal to it (see `unpack`).
  */
 export async function unpackInbound(frameString, { recipient, senderKeys, resolveSender }) {
   const skid = peekSkid(frameString);
@@ -233,13 +238,37 @@ export async function unpackInbound(frameString, { recipient, senderKeys, resolv
 }
 
 /**
+ * The sender an inbound message was authenticated as.
+ *
+ * @typedef {Object} VerifiedSender
+ * @property {string} did - the DID of the authcrypt sender key (`skid`).
+ * @property {string} kid - the sender key id (`skid`) itself.
+ */
+
+/**
+ * An inbound message together with the sender it was authenticated as.
+ *
+ * @typedef {Object} InboundMessage
+ * @property {Object} message - the unpacked DIDComm plaintext message.
+ * @property {VerifiedSender} sender - who sent it, as proven by the envelope.
+ */
+
+/**
  * A live mediator WebSocket session. Browser-first: uses the global
  * `WebSocket` by default, injectable for tests.
  *
  * Lifecycle: `await session.connect()` opens the socket + enables live
  * delivery; `session.send(jwe)` ships a frame; `session.waitFor(thid,
- * timeoutMs)` resolves with the first inbound message whose `thid`
- * matches; `session.close()` tears down.
+ * timeoutMs, { from })` resolves with the first inbound message whose `thid`
+ * matches (and, given `from`, whose authenticated sender is that DID);
+ * `session.close()` tears down.
+ *
+ * Every message this session delivers — to a waiter or a listener — comes
+ * with its {@link VerifiedSender}: the DID and key id the authcrypt envelope
+ * was authenticated with. Authorise on that. The message's own `from` is
+ * sender-written plaintext; it is guaranteed equal to `sender.did` here only
+ * because `unpack` refuses anything else, and code that reads `from` instead
+ * of `sender` is one refactor away from trusting a claim.
  */
 export class MediatorSession {
   /**
@@ -250,8 +279,10 @@ export class MediatorSession {
    * @param {Map<string,Object>} [args.senderKeys] - seed sender keys.
    * @param {Function} [args.resolveSender] - async sender-key fallback.
    * @param {Function} [args.WebSocketImpl] - WebSocket ctor (default global).
-   * @param {(message: Object, thid: string) => void|Promise<void>} [args.onMessage]
-   *   - called for each inbound message NOT claimed by a `waitFor` waiter
+   * @param {(message: Object, thid: string, sender: VerifiedSender) => void|Promise<void>} [args.onMessage]
+   *   - called for each inbound message NOT claimed by a `waitFor` waiter,
+   *   with the sender the envelope authenticated (`sender.did`) — the identity
+   *   to authorise on, rather than the message's `from`
    *   (unsolicited inbound, e.g. a server-initiated request). Fired in addition
    *   to the internal buffering, so request/reply via `waitFor` is unaffected;
    *   handlers should filter by the message `type`. **If it returns a promise,
@@ -260,7 +291,7 @@ export class MediatorSession {
    *   so an MV3 teardown between handoff and ack cannot lose it (R1.6). Delivery
    *   is at-least-once: a handler must tolerate seeing the same message twice
    *   across a reconnect and dedupe durably on its own side.
-   * @param {(message: Object, thid: string) => void|Promise<void>} [args.onMediatorMessage]
+   * @param {(message: Object, thid: string, sender: VerifiedSender) => void|Promise<void>} [args.onMediatorMessage]
    *   - called instead of `onMessage` for an unclaimed message whose sender is
    *   the mediator itself: a `messaging/monitor/event` batch, or a Trust-Task
    *   reply that arrived after its waiter gave up. These are the mediator's
@@ -710,7 +741,7 @@ export class MediatorSession {
     //      reply stays in our receive queue and is replayed on each reconnect.
     //      That queue is the one carrying every other message to this DID, and
     //      a full queue refuses them. See `isStoredMediatorReply`.
-    const senderDid = result.senderKid ? result.senderKid.split("#")[0] : null;
+    const senderDid = result.senderDid ?? null;
     const fromMediator = senderDid === this.mediator.did;
     const isQueued = Boolean(senderDid) && (!fromMediator || isStoredMediatorReply(result.message));
 
@@ -743,16 +774,22 @@ export class MediatorSession {
    */
   async _deliver(result) {
     const message = result.message;
+    // `unpackInbound` only returns authcrypt it authenticated, so both are set;
+    // refuse rather than deliver a message with no proven sender.
+    if (typeof result.senderDid !== "string" || typeof result.senderKid !== "string") {
+      throw new Error("mediator-transport: inbound message has no authenticated sender");
+    }
+    /** @type {VerifiedSender} */
+    const sender = Object.freeze({ did: result.senderDid, kid: result.senderKid });
     const thid = threadOf(message);
-    const idx = this._waiters.findIndex((w) => w.thid === thid);
+    const idx = this._waiters.findIndex((w) => w.thid === thid && acceptsSender(w.from, sender));
     if (idx >= 0) {
       const [w] = this._waiters.splice(idx, 1);
       clearTimeout(w.timer);
-      w.resolve(message);
+      w.resolve({ message, sender });
       return;
     }
-    const senderDid = result.senderKid ? result.senderKid.split("#")[0] : null;
-    const fromMediator = senderDid === this.mediator.did;
+    const fromMediator = sender.did === this.mediator.did;
     const listener = fromMediator && this.onMediatorMessage ? this.onMediatorMessage : this.onMessage;
     // Buffer for a not-yet-registered waiter, but bound the buffer so a
     // chatty/malicious mediator can't grow it without limit in a long-lived
@@ -761,7 +798,7 @@ export class MediatorSession {
     // no waiter can want it — buffering it would only evict the raced replies
     // the buffer exists for.
     if (!(fromMediator && message.thid == null && message.pthid == null)) {
-      this._inbox.push({ thid, message });
+      this._inbox.push({ thid, message, sender });
       if (this._inbox.length > MAX_INBOX) this._inbox.shift();
     }
     // Surface unsolicited inbound (server-initiated requests) to a listener, if
@@ -772,7 +809,7 @@ export class MediatorSession {
         // Await so a listener returning a promise (e.g. persist-to-storage)
         // finishes before we ack. A synchronous listener returns undefined and
         // `await` resolves immediately.
-        await listener(message, thid);
+        await listener(message, thid, sender);
       } catch {
         // A throwing listener must not break frame processing.
       }
@@ -826,15 +863,24 @@ export class MediatorSession {
    * refusal arrives as the refusal instead of as a timeout. Checks
    * already-buffered frames first.
    *
+   * A thread id is not a secret — it is the id of a message this client sent
+   * through the mediator — so pass `from` whenever the answering party is
+   * known: a message on the thread from any other authenticated sender is
+   * then not this waiter's reply, and stays available to other waiters and
+   * the `onMessage` listener.
+   *
    * @param {string} thid - the request message id we're correlating to.
    * @param {number} timeoutMs
-   * @returns {Promise<Object>} the unpacked response message.
+   * @param {{ from?: string | readonly string[] }} [options] - the DID (or
+   *   DIDs) the reply must be authenticated as.
+   * @returns {Promise<InboundMessage>} the reply and its authenticated sender.
    */
-  waitFor(thid, timeoutMs) {
-    const buffered = this._inbox.findIndex((m) => m.thid === thid);
+  waitFor(thid, timeoutMs, options = {}) {
+    const from = normalizeFrom(options?.from);
+    const buffered = this._inbox.findIndex((m) => m.thid === thid && acceptsSender(from, m.sender));
     if (buffered >= 0) {
       const [m] = this._inbox.splice(buffered, 1);
-      return Promise.resolve(m.message);
+      return Promise.resolve({ message: m.message, sender: m.sender });
     }
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -842,7 +888,7 @@ export class MediatorSession {
         if (i >= 0) this._waiters.splice(i, 1);
         reject(new Error(`mediator-transport: timeout waiting for response (thid ${thid})`));
       }, timeoutMs);
-      this._waiters.push({ thid, resolve, reject, timer });
+      this._waiters.push({ thid, from, resolve, reject, timer });
     });
   }
 
@@ -867,6 +913,32 @@ export class MediatorSession {
 }
 
 export { LIVE_DELIVERY_CHANGE_TYPE, TRUST_TASK_ENVELOPE_TYPE };
+
+/**
+ * Normalise a `waitFor` `from` option to a list of DIDs, or null for "any".
+ *
+ * @param {string | readonly string[] | undefined} from
+ * @returns {readonly string[] | null}
+ */
+function normalizeFrom(from) {
+  if (from == null) return null;
+  const list = typeof from === "string" ? [from] : Array.from(from);
+  if (list.length === 0 || list.some((d) => typeof d !== "string" || d.length === 0)) {
+    throw new TypeError("mediator-transport: waitFor `from` must be a DID or a non-empty list of DIDs");
+  }
+  return list;
+}
+
+/**
+ * Whether a waiter restricted to `from` may take a message from `sender`.
+ *
+ * @param {readonly string[] | null} from
+ * @param {VerifiedSender} sender
+ * @returns {boolean}
+ */
+function acceptsSender(from, sender) {
+  return from === null || from.includes(sender.did);
+}
 
 /**
  * The thread a message answers — what a `waitFor` waiter is keyed by.

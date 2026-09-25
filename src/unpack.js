@@ -7,7 +7,19 @@
 //     SuppPrivInfo, so a tampered ciphertext fails the AES-KW
 //     integrity check before decryption.
 //   - "ECDH-ES+A256KW" (anoncrypt): no sender. No `skid`/`apu`, no
-//     SuppPrivInfo. `sender` is ignored and `senderKid` is undefined.
+//     SuppPrivInfo. `sender` is ignored and `senderKid`/`senderDid`
+//     are null.
+//
+// ## Who sent it
+//
+// Authorise on the returned `senderDid`, never on `message.from`.
+// `from` is a claim the sender writes into the plaintext; `senderDid` is
+// the DID part of `skid`, the key the envelope was actually authenticated
+// with — provided the caller resolved `sender.publicJwk` from that DID.
+// For authcrypt the two must agree: a message whose `from` is missing or
+// names any other DID is refused (`E_SENDER_MISMATCH`), so a sender can
+// only speak as the DID whose key it holds. For anoncrypt nothing is
+// authenticated and `senderDid` is null whatever `from` says.
 //
 // The recipient supplies their `kid` + key-agreement private key
 // (X25519 or P-256 — must match the envelope's `epk` curve). For
@@ -25,6 +37,40 @@ const ALG_AUTHCRYPT = "ECDH-1PU+A256KW";
 const ALG_ANONCRYPT = "ECDH-ES+A256KW";
 const ENC = "A256CBC-HS512";
 
+/** Stable code for an authcrypt message whose `from` is not its `skid`'s DID. */
+export const E_SENDER_MISMATCH = "E_SENDER_MISMATCH";
+
+/**
+ * The DID a key id belongs to — the DID URL with its fragment removed.
+ *
+ * @param {string} kid
+ * @returns {string}
+ */
+export function didOfKid(kid) {
+  return String(kid).split("#")[0];
+}
+
+/**
+ * An authcrypt message claims a sender (`from`) that is not the DID of the
+ * key it was authenticated with (`skid`).
+ */
+export class SenderMismatchError extends Error {
+  /**
+   * @param {string} message
+   * @param {{ senderDid: string, claimedFrom: unknown }} detail
+   */
+  constructor(message, { senderDid, claimedFrom }) {
+    super(message);
+    this.name = "SenderMismatchError";
+    /** @type {string} */
+    this.code = E_SENDER_MISMATCH;
+    /** @type {string} */
+    this.senderDid = senderDid;
+    /** @type {unknown} */
+    this.claimedFrom = claimedFrom;
+  }
+}
+
 /**
  * Unpack an authcrypt or anoncrypt JWE.
  *
@@ -33,10 +79,16 @@ const ENC = "A256CBC-HS512";
  * @param {Object} [sender] - `{ publicJwk }` — the sender's X25519
  *   public key, required for authcrypt (ECDH-1PU), ignored for
  *   anoncrypt (ECDH-ES).
- * @returns {Promise<{ message: Object, senderKid: string|undefined, authenticated: boolean, legacyKekUsed: boolean }>}
- *   `legacyKekUsed` is true when an authcrypt message only decrypted
- *   under the pre-0.5 (unprefixed cc_tag) KEK — a migration signal that
- *   the sender hasn't upgraded yet.
+ * @returns {Promise<{ message: Object, senderKid: string|null, senderDid: string|null, authenticated: boolean, legacyKekUsed: boolean }>}
+ *   `senderKid` is the authenticated sender key id (`skid`) and
+ *   `senderDid` its DID; both are null for anoncrypt. `message.from` is
+ *   sender-asserted plaintext and is **not** an identity to authorise on:
+ *   for authcrypt it has been checked equal to `senderDid`, for anoncrypt
+ *   it is unauthenticated. `legacyKekUsed` is true when an authcrypt
+ *   message only decrypted under the pre-0.5 (unprefixed cc_tag) KEK — a
+ *   migration signal that the sender hasn't upgraded yet.
+ * @throws {SenderMismatchError} for authcrypt whose `from` is not the DID
+ *   of `skid` (`code: "E_SENDER_MISMATCH"`).
  */
 export async function unpack(jweJson, recipient, sender) {
   if (typeof jweJson !== "string") {
@@ -205,9 +257,31 @@ export async function unpack(jweJson, recipient, sender) {
     throw new Error(`unpack: plaintext not JSON: ${e.message}`);
   }
 
+  if (message === null || typeof message !== "object" || Array.isArray(message)) {
+    throw new Error("unpack: plaintext is not a JSON object");
+  }
+
+  // 8. Bind the claimed sender to the authenticated one. The KEK proves
+  //    the envelope was made with the key `skid` names; nothing so far ties
+  //    that to the `from` the plaintext asserts, and consumers read `from`.
+  //    DIDComm v2 requires `from` on an authcrypt message and requires
+  //    `skid` to be a key of it, so anything else is refused here rather
+  //    than handed on for each consumer to get right.
+  let senderDid = null;
+  if (isAuthcrypt) {
+    senderDid = didOfKid(header.skid);
+    if (!senderDid.startsWith("did:") || typeof message.from !== "string" || message.from !== senderDid) {
+      throw new SenderMismatchError(
+        `unpack: authcrypt from (${JSON.stringify(message.from)}) is not the DID of skid (${JSON.stringify(header.skid)})`,
+        { senderDid, claimedFrom: message.from },
+      );
+    }
+  }
+
   return {
     message,
-    senderKid: isAuthcrypt ? header.skid : undefined,
+    senderKid: isAuthcrypt ? header.skid : null,
+    senderDid,
     authenticated: isAuthcrypt,
     legacyKekUsed,
   };

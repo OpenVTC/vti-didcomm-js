@@ -44,7 +44,8 @@ test("packAnoncrypt → unpack round-trips (JS only), no sender required", async
   });
   assert.equal(out.message.body.hi, "anon");
   assert.equal(out.authenticated, false);
-  assert.equal(out.senderKid, undefined);
+  assert.equal(out.senderKid, null);
+  assert.equal(out.senderDid, null, "anoncrypt has no sender, whatever `from` says");
 });
 
 test("packAnoncrypt protected header has ECDH-ES alg, no skid/apu", async () => {
