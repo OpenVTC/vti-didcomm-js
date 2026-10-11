@@ -155,14 +155,15 @@ test("VtaMediatorClient.sendAndWait: emits forward, resolves on thid-correlated 
   vtaClient.close();
 });
 
-test("resolveX25519KeyAgreement: extracts X25519 from the live VTA DID", async () => {
-  // Live did:webvh resolution (network). Confirms the orchestration's
-  // recipient-resolution against the real VTA DID.
-  const { kid, x25519Pub } = await resolveX25519KeyAgreement(
-    "did:webvh:QmWoJD2kpP6AJknNtj7UFERUstEen258ywj3ruHoh1ZAqr:webvh.storm.ws:glenn-vta",
-  );
-  assert.ok(kid.endsWith("#key-1"));
-  assert.equal(x25519Pub.length, 32);
+test("resolveX25519KeyAgreement: extracts the X25519 keyAgreement key and its kid", async () => {
+  // Offline: a did:peer:2 carrying one X25519 keyAgreement key. This used to
+  // resolve a live did:webvh, and broke CI for every PR the day that DID was
+  // re-created under a new SCID — resolution correctly refused the old one.
+  const { publicKey } = x25519.generateKeyPair();
+  const did = `did:peer:2.E${multibase.encodeMultikey(multibase.MULTICODEC.X25519_PUB, publicKey)}`;
+  const { kid, x25519Pub } = await resolveX25519KeyAgreement(did);
+  assert.equal(kid, `${did}#key-1`);
+  assert.deepEqual(x25519Pub, publicKey);
 });
 
 async function waitUntil(pred, timeoutMs) {
