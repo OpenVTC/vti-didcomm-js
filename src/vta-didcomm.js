@@ -183,7 +183,14 @@ export class VtaMediatorClient {
     //    response arrives before waitFor is called.
     //    Only a reply authenticated as the VTA answers this request.
     const waiter = this.session.waitFor(id, timeoutMs, { from: this.vtaDid });
-    this.session.send(forwardJwe);
+    try {
+      this.session.send(forwardJwe);
+    } catch (err) {
+      // Nothing will await the waiter now, and it still rejects later (timeout
+      // or socket close) — unobserved, an uncaught rejection on top of this one.
+      waiter.catch(() => {});
+      throw err;
+    }
     return (await waiter).message;
   }
 

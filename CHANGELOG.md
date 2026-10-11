@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `VtaDidcommClient.sendAndAwaitReply` no longer leaves an unobserved reply
+  waiter when the send throws (e.g. `mediator-transport: not connected`). The
+  waiter still rejected later on timeout or socket close, which surfaced as an
+  `Uncaught (in promise)` beside the real error.
+
 ### Tests
 
 - The Rust round-trip helper (`tools/roundtrip-helper`) is on
