@@ -4,7 +4,7 @@
 // B2: ECDH-1PU + AES + A256CBC-HS512 + pack/unpack. Key agreement
 //     over X25519 or P-256 (key-agreement.js dispatches by curve).
 // B3: DID resolver (did:key + did:peer in-tree, did:webvh via
-//     didwebvh-ts).
+//     didwebvh-ts, did:scid:vh:1 through its did:webvh log).
 // B4: VTA REST auth via DIDComm-packed /auth/.
 // M1-M4: mediator transport — mediator auth, routing/2.0/forward,
 //        WebSocket + message-pickup 3.0 live delivery, sendAndWait.
@@ -25,10 +25,12 @@ export * as aes from "./aes.js";
 export * as a256cbcHs512 from "./a256cbc-hs512.js";
 export { pack } from "./pack.js";
 export { packAnoncrypt } from "./anoncrypt.js";
-export { unpack, SenderMismatchError, E_SENDER_MISMATCH, didOfKid } from "./unpack.js";
+export { unpack, SenderMismatchError, E_SENDER_MISMATCH, didOfKid, identityOfKid } from "./unpack.js";
 export * as didKey from "./did-key.js";
 export * as didWebvh from "./did-webvh.js";
 export * as didPeer from "./did-peer.js";
+export * as didScid from "./did-scid.js";
+export { stripScidSrc, scidSrc, withScidSrc, sameReference, scidIdentity } from "./did-scid.js";
 export {
   createResolver,
   defaultResolver,
@@ -36,6 +38,7 @@ export {
   clearDidCache,
   invalidateDid,
   setDidCacheTtl,
+  addScidSource,
   DEFAULT_DID_CACHE_TTL_MS,
 } from "./resolver.js";
 export * as vtaRestAuth from "./vta-rest-auth.js";

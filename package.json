@@ -79,6 +79,10 @@
       "types": "./types/did-peer.d.ts",
       "import": "./src/did-peer.js"
     },
+    "./did-scid": {
+      "types": "./types/did-scid.d.ts",
+      "import": "./src/did-scid.js"
+    },
     "./resolver": {
       "types": "./types/resolver.d.ts",
       "import": "./src/resolver.js"
@@ -138,6 +142,7 @@
     "didcomm",
     "did",
     "did:webvh",
+    "did:scid",
     "did:key",
     "did:peer",
     "authcrypt",

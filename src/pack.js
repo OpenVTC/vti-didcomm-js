@@ -50,6 +50,7 @@ import * as b64u from "./base64url.js";
 import * as ecdh1pu from "./ecdh-1pu.js";
 import * as jwk from "./jwk.js";
 import * as keyAgreement from "./key-agreement.js";
+import { scidIdentity, scidSrc, withScidSrc } from "./did-scid.js";
 
 const ALG = "ECDH-1PU+A256KW";
 const ENC = "A256CBC-HS512";
@@ -65,7 +66,11 @@ const TYP = "application/didcomm-encrypted+json";
  * @param {Object} args.sender   - `{ kid, privateJwk }`. `kid`
  *   identifies the sender's key on their DID document; the JWE's
  *   `skid` field carries it verbatim so the recipient can resolve
- *   the matching public key.
+ *   the matching public key — except that a bare did:scid key id
+ *   (`did:scid:vh:1:<scid>#key-1`) whose DID is a `from` carrying a
+ *   `src` gains that `src` (`…?src=<source>#key-1`): the recipient
+ *   resolves `skid` before it can read `from`, and a bare did:scid
+ *   names no source (VTI-KEY-163).
  * @param {Object} args.recipient - `{ kid, publicJwk }`. Single
  *   recipient (multi-recipient is out of scope per B0).
  * @returns {Promise<string>} the packed JWE as a JSON string
@@ -91,6 +96,7 @@ export async function pack({ message, sender, recipient }) {
   }
   const senderPriv = jwk.rawPrivate(sender.privateJwk);
   const recipientPub = jwk.rawPublic(recipient.publicJwk);
+  const skid = senderKid(sender.kid, message?.from);
 
   // 1. Ephemeral keypair on the recipient's curve.
   const ephem = keyAgreement.generateKeyPair(crv);
@@ -101,7 +107,7 @@ export async function pack({ message, sender, recipient }) {
   // 3. apu / apv inputs. apu is the raw bytes of the sender kid;
   //    apv is the sha256 of the recipient kid string (DIDComm v2
   //    convention for single-recipient envelopes).
-  const apuBytes = new TextEncoder().encode(sender.kid);
+  const apuBytes = new TextEncoder().encode(skid);
   const apvBytes = await sha256(new TextEncoder().encode(recipient.kid));
 
   // 4. Protected header. JSON-serialised (compact, no whitespace)
@@ -113,7 +119,7 @@ export async function pack({ message, sender, recipient }) {
     enc: ENC,
     apu: b64u.encode(apuBytes),
     apv: b64u.encode(apvBytes),
-    skid: sender.kid,
+    skid,
     epk: jwk.publicJwk(crv, ephem.publicKey),
   };
   const protectedJson = JSON.stringify(protectedHeader);
@@ -171,4 +177,12 @@ export async function pack({ message, sender, recipient }) {
 async function sha256(bytes) {
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   return new Uint8Array(digest);
+}
+
+// The `skid` for `kid`: with the `src` of a did:scid `from` added when
+// `kid` is a bare key of that DID.
+function senderKid(kid, from) {
+  const src = typeof from === "string" ? scidSrc(from) : null;
+  if (!src || scidIdentity(kid) !== scidIdentity(from)) return kid;
+  return withScidSrc(kid, src);
 }

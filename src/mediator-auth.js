@@ -44,6 +44,7 @@ import { pack } from "./pack.js";
 import { assertSafeEndpoint, guardedFetch } from "./net-guard.js";
 import * as multibase from "./multibase.js";
 import * as jwk from "./jwk.js";
+import { sameReference } from "./did-scid.js";
 
 const AUTH_MESSAGE_TYPE = "https://affinidi.com/atm/1.0/authenticate";
 
@@ -317,7 +318,7 @@ function extractX25519KeyAgreement(didDocument, did) {
   }
   let vm = ka[0];
   if (typeof vm === "string") {
-    const found = (didDocument.verificationMethod ?? []).find((v) => v.id === vm);
+    const found = (didDocument.verificationMethod ?? []).find((v) => sameReference(v.id, vm));
     if (!found) throw new Error(`mediator-auth: keyAgreement ref ${vm} not resolvable`);
     vm = found;
   }

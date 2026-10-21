@@ -33,10 +33,18 @@
 // a relaxed policy is served as-is to later callers; a caller that needs
 // the strict policy applied to its own resolution should not share a
 // resolver with one that relaxes it.
+//
+// did:scid keys the cache on the bare DID, with its `src` locator removed:
+// `did:scid:vh:1:<scid>?src=a.example`, `…?src=b.example` and the bare DID
+// are one identity (VTI-KEY-160) and share one entry. Each resolver owns a
+// did:scid source book (see `./did-scid.js`), so a bare did:scid resolves
+// through the source that resolver last verified for its SCID, and a log
+// older than one it already verified is refused.
 
 import * as didKey from "./did-key.js";
 import * as didWebvh from "./did-webvh.js";
 import * as didPeer from "./did-peer.js";
+import * as didScid from "./did-scid.js";
 
 const DEFAULT_RESOLVERS = Object.freeze({
   key: didKey,
@@ -69,6 +77,8 @@ const UNCACHED_METHODS = new Set(["key", "peer"]);
  * @param {number} [config.maxEntries=500] - upper bound on cached
  *   resolutions. The least recently used entry is evicted first. `0`
  *   disables caching entirely.
+ * @param {number} [config.scidSourceCapacity=100000] - upper bound on the
+ *   did:scid SCIDs whose source and latest version are remembered.
  * @returns {{
  *   resolve(did: string, options?: Object): Promise<{
  *     didDocument: Object,
@@ -79,13 +89,20 @@ const UNCACHED_METHODS = new Set(["key", "peer"]);
  *   invalidate(did: string): void,
  *   setCacheTtl(ms: number): void,
  *   size(): number,
+ *   addScidSource(didUrl: string): boolean,
+ *   scidSource(did: string): string|null,
  * }}
  */
 export function createResolver(
   overrides = {},
-  { cacheTtlMs = DEFAULT_DID_CACHE_TTL_MS, maxEntries = DEFAULT_DID_CACHE_MAX_ENTRIES } = {},
+  {
+    cacheTtlMs = DEFAULT_DID_CACHE_TTL_MS,
+    maxEntries = DEFAULT_DID_CACHE_MAX_ENTRIES,
+    scidSourceCapacity = didScid.DEFAULT_SCID_SOURCE_CAPACITY,
+  } = {},
 ) {
-  const handlers = { ...DEFAULT_RESOLVERS, ...overrides };
+  const scidSources = didScid.createScidSourceBook({ capacity: scidSourceCapacity });
+  const handlers = { ...DEFAULT_RESOLVERS, scid: didScid.createHandler(scidSources), ...overrides };
   /** @type {Map<string, { expires: number, result: Object }>} */
   const cache = new Map();
   /** @type {Map<string, Promise<Object>>} */
@@ -146,25 +163,28 @@ export function createResolver(
       return rawResolve(did, options);
     }
 
+    const key = cacheKey(did);
     const now = Date.now();
-    const hit = cache.get(did);
+    const hit = cache.get(key);
     if (hit) {
       if (hit.expires > now) {
         // Re-insert so this entry becomes the most recently used.
-        cache.delete(did);
-        cache.set(did, hit);
+        cache.delete(key);
+        cache.set(key, hit);
         return hit.result;
       }
-      cache.delete(did);
+      cache.delete(key);
     }
 
-    // De-dup concurrent resolutions of the same DID into one fetch.
+    // De-dup concurrent resolutions of the same DID into one fetch. The
+    // in-flight map keys on the DID as given, so a bare did:scid never
+    // waits on a resolution through a `src` it did not name.
     let pending = inflight.get(did);
     if (!pending) {
       pending = rawResolve(did, options)
         .then((result) => {
           if (isCacheable(result)) {
-            store(did, result);
+            store(key, result);
           }
           inflight.delete(did);
           return result;
@@ -186,7 +206,7 @@ export function createResolver(
     },
     /** Drop a single DID's cached resolution (e.g. after a key rotation). */
     invalidate(did) {
-      cache.delete(did);
+      cache.delete(cacheKey(did));
     },
     /** Change the cache TTL (ms). `0` disables caching; existing entries
      *  are cleared so the change takes effect immediately. */
@@ -198,12 +218,29 @@ export function createResolver(
     size() {
       return cache.size;
     },
+    /**
+     * Record the `src` of a did:scid DID URL as where this resolver looks
+     * for that SCID, so the bare DID resolves — for example, a source the
+     * caller kept across a restart. Returns false when `didUrl` has no `src`.
+     */
+    addScidSource(didUrl) {
+      return scidSources.addSource(didUrl);
+    },
+    /** The source this resolver holds for a did:scid's SCID, in `src` form. */
+    scidSource(did) {
+      return scidSources.source(did);
+    },
   };
+}
+
+// A did:scid's `src` is a locator, not part of the identity.
+function cacheKey(did) {
+  return didScid.stripScidSrc(did);
 }
 
 /**
  * Convenience: a default resolver wired up with the built-in
- * handlers (did:key + did:peer + did:webvh). Equivalent to
+ * handlers (did:key + did:peer + did:webvh + did:scid). Equivalent to
  * `createResolver()`, but doesn't allocate a fresh handler map +
  * cache on every call — so this is the shared, process-wide cache.
  */
@@ -234,6 +271,11 @@ export function invalidateDid(did) {
 /** Set the shared default-resolver cache TTL (ms); `0` disables caching. */
 export function setDidCacheTtl(ms) {
   defaultResolver.setCacheTtl(ms);
+}
+
+/** Record a did:scid source in the shared default resolver. */
+export function addScidSource(didUrl) {
+  return defaultResolver.addScidSource(didUrl);
 }
 
 /** Number of entries in the shared default-resolver cache. */

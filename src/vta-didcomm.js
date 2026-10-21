@@ -23,6 +23,7 @@ import { authenticateToMediator } from "./mediator-auth.js";
 import { MediatorSession } from "./mediator-transport.js";
 import * as multibase from "./multibase.js";
 import * as jwk from "./jwk.js";
+import { sameReference } from "./did-scid.js";
 
 /**
  * Connect to a VTA via its mediator and return a client for
@@ -223,7 +224,7 @@ export async function resolveX25519KeyAgreement(did, { netPolicy } = {}) {
   }
   let vm = ka[0];
   if (typeof vm === "string") {
-    const found = (didDocument.verificationMethod ?? []).find((v) => v.id === vm);
+    const found = (didDocument.verificationMethod ?? []).find((v) => sameReference(v.id, vm));
     if (!found) throw new Error(`vta-didcomm: keyAgreement ref ${vm} not resolvable`);
     vm = found;
   }
@@ -260,8 +261,8 @@ export async function resolveX25519KeyAgreementKey(did, kid, { netPolicy } = {})
   let vm;
   for (const entry of didDocument.keyAgreement ?? []) {
     const id = abs(typeof entry === "string" ? entry : entry?.id);
-    if (id !== kid) continue;
-    vm = typeof entry === "string" ? methods.find((v) => abs(v.id) === kid) : entry;
+    if (!sameReference(id, kid)) continue;
+    vm = typeof entry === "string" ? methods.find((v) => sameReference(abs(v.id), kid)) : entry;
     break;
   }
   if (!vm) throw new Error(`vta-didcomm: ${did} lists no keyAgreement key ${kid}`);

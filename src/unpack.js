@@ -32,6 +32,7 @@ import * as b64u from "./base64url.js";
 import * as ecdh1pu from "./ecdh-1pu.js";
 import * as ecdhEs from "./ecdh-es.js";
 import * as jwk from "./jwk.js";
+import { scidIdentity } from "./did-scid.js";
 
 const ALG_AUTHCRYPT = "ECDH-1PU+A256KW";
 const ALG_ANONCRYPT = "ECDH-ES+A256KW";
@@ -48,6 +49,19 @@ export const E_SENDER_MISMATCH = "E_SENDER_MISMATCH";
  */
 export function didOfKid(kid) {
   return String(kid).split("#")[0];
+}
+
+/**
+ * The identity a key id belongs to: its DID, with no fragment and no
+ * did:scid `src` locator. A did:scid sender may present
+ * `did:scid:vh:1:<scid>?src=…` in `from` and `skid` so a recipient can
+ * resolve it; its identity is `did:scid:vh:1:<scid>` either way.
+ *
+ * @param {string} kid
+ * @returns {string}
+ */
+export function identityOfKid(kid) {
+  return scidIdentity(kid);
 }
 
 /**
@@ -81,7 +95,8 @@ export class SenderMismatchError extends Error {
  *   anoncrypt (ECDH-ES).
  * @returns {Promise<{ message: Object, senderKid: string|null, senderDid: string|null, authenticated: boolean, legacyKekUsed: boolean }>}
  *   `senderKid` is the authenticated sender key id (`skid`) and
- *   `senderDid` its DID; both are null for anoncrypt. `message.from` is
+ *   `senderDid` its identity (`identityOfKid`: a did:scid without its
+ *   `src`); both are null for anoncrypt. `message.from` is
  *   sender-asserted plaintext and is **not** an identity to authorise on:
  *   for authcrypt it has been checked equal to `senderDid`, for anoncrypt
  *   it is unauthenticated. `legacyKekUsed` is true when an authcrypt
@@ -269,8 +284,13 @@ export async function unpack(jweJson, recipient, sender) {
   //    than handed on for each consumer to get right.
   let senderDid = null;
   if (isAuthcrypt) {
-    senderDid = didOfKid(header.skid);
-    if (!senderDid.startsWith("did:") || typeof message.from !== "string" || message.from !== senderDid) {
+    senderDid = identityOfKid(header.skid);
+    if (
+      !senderDid.startsWith("did:") ||
+      typeof message.from !== "string" ||
+      message.from.includes("#") ||
+      identityOfKid(message.from) !== senderDid
+    ) {
       throw new SenderMismatchError(
         `unpack: authcrypt from (${JSON.stringify(message.from)}) is not the DID of skid (${JSON.stringify(header.skid)})`,
         { senderDid, claimedFrom: message.from },
