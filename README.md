@@ -25,8 +25,9 @@ infrastructure for verifiable trust.
   mediator. X25519 or P-256.
 - **DID resolution** — `did:key` (Ed25519/X25519/P-256/secp256k1,
   in-tree), `did:peer` (numalgo 2, in-tree) and `did:webvh` (via
-  [`didwebvh-ts`], full hash-chain + Data-Integrity verification).
-  Pluggable dispatcher for adding methods.
+  [`didwebvh-ts`], full hash-chain + Data-Integrity verification), and
+  `did:scid:vh:1` through the same did:webvh log. Pluggable dispatcher
+  for adding methods.
 - **Forward routing** — `https://didcomm.org/routing/2.0/forward`
   wrapping.
 - **VTA REST auth** — DIDComm-packed `/auth/` challenge-response + JWT
@@ -170,6 +171,33 @@ A did:webvh host that merely *contains* `localhost` (say
 `didwebvh-ts` treats any such identifier as local and fetches it over
 plaintext `http`.
 
+### did:scid
+
+A `did:scid:vh:1` identity is the DID `did:scid:vh:1:<scid>`; its `src`
+query parameter only says where its did:webvh log is published, so the log
+can move and the identity stays the same. Resolving a DID URL with `src`
+verifies that log (the host guard applies to the `src` host) and returns the
+did:scid's **own** document: `id` is the bare DID, its keys are under it, and
+`alsoKnownAs` names the did:webvh DID and the `src` URL.
+
+```js
+const { didDocument } = await resolve(`did:scid:vh:1:${scid}?src=dids.example.org/alice`);
+didDocument.id; // "did:scid:vh:1:<scid>"
+
+// The bare DID resolves through the source this resolver last verified for
+// its SCID — or one you kept and seed back after a restart:
+addScidSource(`did:scid:vh:1:${scid}?src=dids.example.org/alice`);
+await resolve(`did:scid:vh:1:${scid}`);
+```
+
+A resolver refuses a log older than one it has already verified for the same
+SCID: any host can serve a copy of a log it once fetched, and the SCID makes a
+copy unforgeable, not current. Compare did:scid references with
+`sameReference` (or `stripScidSrc`), never `===`: a reference may carry the
+`src` its document does not. `pack` adds a did:scid `from`'s `src` to the
+`skid`, so a recipient that has never seen the sender can resolve it, and
+`unpack` returns the sender's identity — the bare DID — as `senderDid`.
+
 Browsers expose no DNS API, so a public name that resolves to a private
 address passes the URL check there; `allowHosts` is the strong control. In
 Node, `guardedLookup` also filters resolved addresses at connect time:
@@ -203,6 +231,7 @@ src/
   unpack.js             dual-mode unpack (authcrypt + anoncrypt)
   did-key.js            did:key resolver
   did-webvh.js          did:webvh resolver (via didwebvh-ts)
+  did-scid.js           did:scid:vh:1 resolver, src helpers, source book
   did-peer.js           did:peer resolver (numalgo 2, in-tree)
   resolver.js           method dispatcher
   forward.js            routing/2.0/forward wrapping

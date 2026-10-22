@@ -26,7 +26,8 @@
 // protected header and pick the matching sender public key from a
 // seeded map (mediator + VTA), falling back to DID resolution.
 
-import { unpack, didOfKid, E_SENDER_MISMATCH } from "./unpack.js";
+import { unpack, didOfKid, identityOfKid, E_SENDER_MISMATCH } from "./unpack.js";
+import { sameReference } from "./did-scid.js";
 import { pack } from "./pack.js";
 import { assertSafeEndpoint } from "./net-guard.js";
 import * as b64u from "./base64url.js";
@@ -221,7 +222,9 @@ function absoluteKid(did, kid) {
 }
 
 /**
- * The key among `entry` whose id is exactly `skid`, or undefined.
+ * The key among `entry` whose id is `skid`, or undefined. A did:scid `src`
+ * locator is ignored on both sides: the document lists keys under the bare
+ * DID, and the `skid` carries the `src` the recipient resolved it through.
  *
  * @param {Object|Object[]|undefined} entry - `{ kid, publicJwk }` or a list.
  * @param {string} did
@@ -229,7 +232,7 @@ function absoluteKid(did, kid) {
  */
 function keyForSkid(entry, did, skid) {
   const list = Array.isArray(entry) ? entry : entry ? [entry] : [];
-  return list.find((k) => k?.publicJwk && absoluteKid(did, k.kid) === skid);
+  return list.find((k) => k?.publicJwk && sameReference(absoluteKid(did, k.kid), skid));
 }
 
 /**
@@ -262,8 +265,13 @@ export async function unpackInbound(frameString, { recipient, senderKeys, resolv
   if (!skid) {
     throw new Error("mediator-transport: inbound frame has no skid (anoncrypt not supported)");
   }
+  // Resolve through the DID URL the `skid` names — for a did:scid, with
+  // the `src` a first-contact recipient needs; seeded keys are keyed by
+  // identity.
   const senderDid = didOfKid(skid);
-  let sender = keyForSkid(senderKeys.get(senderDid), senderDid, skid);
+  let sender =
+    keyForSkid(senderKeys.get(identityOfKid(skid)), senderDid, skid) ??
+    keyForSkid(senderKeys.get(senderDid), senderDid, skid);
   if (!sender && typeof resolveSender === "function") {
     sender = keyForSkid(await resolveSender(senderDid, skid), senderDid, skid);
   }
@@ -682,7 +690,7 @@ export class MediatorSession {
         resolveSender: this.resolveSender,
       });
     } catch (err) {
-      if (PERMANENTLY_REFUSED.has(err?.code) && peekSkid(text)?.split("#")[0] !== this.mediator.did) {
+      if (PERMANENTLY_REFUSED.has(err?.code) && identityOfKid(peekSkid(text) ?? "") !== identityOfKid(this.mediator.did)) {
         // Decrypted for us and refused for good (a `from` that is not the
         // sender key's DID, or no authenticated sender). Nothing is delivered;
         // the frame is acked so the mediator stops redelivering it, and
@@ -799,7 +807,7 @@ export class MediatorSession {
     //      That queue is the one carrying every other message to this DID, and
     //      a full queue refuses them. See `isStoredMediatorReply`.
     const senderDid = result.senderDid ?? null;
-    const fromMediator = senderDid === this.mediator.did;
+    const fromMediator = senderDid === identityOfKid(this.mediator.did);
     const isQueued = Boolean(senderDid) && (!fromMediator || isStoredMediatorReply(result.message));
 
     // For a queued message, the mediator queue-id doubles as the ack id and the
@@ -846,7 +854,7 @@ export class MediatorSession {
       w.resolve({ message, sender });
       return;
     }
-    const fromMediator = sender.did === this.mediator.did;
+    const fromMediator = sender.did === identityOfKid(this.mediator.did);
     const listener = fromMediator && this.onMediatorMessage ? this.onMediatorMessage : this.onMessage;
     // Buffer for a not-yet-registered waiter, but bound the buffer so a
     // chatty/malicious mediator can't grow it without limit in a long-lived
@@ -983,7 +991,8 @@ function normalizeFrom(from) {
   if (list.length === 0 || list.some((d) => typeof d !== "string" || d.length === 0)) {
     throw new TypeError("mediator-transport: waitFor `from` must be a DID or a non-empty list of DIDs");
   }
-  return list;
+  // Senders are matched by identity: a did:scid without its `src`.
+  return list.map(identityOfKid);
 }
 
 /**

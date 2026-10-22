@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`did:scid:vh:1` resolution, used natively.** A did:scid DID URL
+  (`did:scid:vh:1:<scid>?src=<host>[/<path>]`) resolves through its did:webvh
+  log, under the same `netPolicy` (the guard applies to the `src` host), to
+  the did:scid's own document: `id` is the bare `did:scid:vh:1:<scid>`, every
+  reference the log makes to itself is under it, and `alsoKnownAs` names the
+  did:webvh DID and the `src` URL. Mirrors the TDK and `didwebvh-rs`
+  `to_scid_did_document`.
+- Each resolver keeps a bounded did:scid **source book**: a bare DID
+  resolves through the source last verified for its SCID (seed one with
+  `resolver.addScidSource(didUrl)`, or `addScidSource` for the default
+  resolver), and a log older than one already verified for that SCID is
+  refused. All DID URLs of one did:scid share a cache entry.
+- `stripScidSrc`, `scidSrc`, `withScidSrc`, `sameReference`, `scidIdentity`
+  and `identityOfKid`, and the `./did-scid` subpath.
+
+### Changed
+
+- `pack` adds the `src` of a did:scid `from` to a bare did:scid `skid` of the
+  same DID, so a first-contact recipient can resolve the sender.
+- `unpack` binds an authcrypt `from` to its `skid` by identity, ignoring a
+  did:scid `src`, and `senderDid` is that identity (the bare did:scid for a
+  did:scid sender). Other DIDs bind exactly as before.
+- Sender-key lookups (`unpackInbound`, `resolveX25519KeyAgreementKey`,
+  keyAgreement references in mediator auth and VTA DIDComm) match a key id
+  by DID and fragment, ignoring a did:scid `src`. `waitFor({ from })`
+  matches senders by identity.
+
 ### Fixed
 
 - `VtaDidcommClient.sendAndAwaitReply` no longer leaves an unobserved reply
