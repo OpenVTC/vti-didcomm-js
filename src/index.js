@@ -28,6 +28,7 @@ export { packAnoncrypt } from "./anoncrypt.js";
 export { unpack, SenderMismatchError, E_SENDER_MISMATCH, didOfKid, identityOfKid } from "./unpack.js";
 export * as didKey from "./did-key.js";
 export * as didWebvh from "./did-webvh.js";
+export { DidVersionNotFoundError, DID_VERSION_NOT_FOUND } from "./did-webvh.js";
 export * as didPeer from "./did-peer.js";
 export * as didScid from "./did-scid.js";
 export { stripScidSrc, scidSrc, withScidSrc, sameReference, scidIdentity } from "./did-scid.js";

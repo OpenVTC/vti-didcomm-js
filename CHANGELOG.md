@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **did:webvh resolution as of a time.** `resolve(did, { versionTime })` —
+  through the resolver, `didWebvh.resolve` and `didWebvh.resolveLog`, and for
+  `did:scid:vh:1` — returns the document of the last log entry whose
+  `versionTime` is at or before the instant (did:webvh v1.0). The whole log is
+  verified first exactly as for a current resolution (hash chain, proofs,
+  pre-rotation, witness thresholds). An instant before the DID's first entry
+  throws `DidVersionNotFoundError` (`code: "E_DID_VERSION_NOT_FOUND"`, both
+  exported). `didwebvh-ts`'s own `versionTime` selector is not used: it
+  selects nothing at an instant equal to an entry's `versionTime`, and once it
+  has selected an entry it swallows any later failure, skipping the witness
+  checks.
+- A resolution with `versionTime` bypasses the resolver cache in both
+  directions, and neither advances nor is checked against a did:scid source
+  book.
+
 ## [0.13.0] - 2026-10-26
 
 ### Added

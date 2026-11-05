@@ -46,6 +46,37 @@ import { BlockedEndpointError, assertSafeEndpoint, guardedFetch } from "./net-gu
 /** Default upper bound on one `did.jsonl` / `did-witness.json` fetch (ms). */
 export const DEFAULT_WEBVH_TIMEOUT_MS = 10000;
 
+/** `code` of a {@link DidVersionNotFoundError}. */
+export const DID_VERSION_NOT_FOUND = "E_DID_VERSION_NOT_FOUND";
+
+/**
+ * A resolution as of a `versionTime` found no version of the DID in force
+ * then: the instant precedes the log's first entry, so the DID did not yet
+ * exist. The log itself verified — this is an answer about the DID, not a
+ * failure to resolve it. Match on `code` ({@link DID_VERSION_NOT_FOUND}).
+ */
+export class DidVersionNotFoundError extends Error {
+  /**
+   * @param {string} message
+   * @param {Object} [details]
+   * @param {string} [details.did]
+   * @param {string} [details.versionTime] - the requested instant, ISO 8601.
+   * @param {string} [details.created] - the `versionTime` of the log's first entry.
+   */
+  constructor(message, { did, versionTime, created } = {}) {
+    super(message);
+    this.name = "DidVersionNotFoundError";
+    /** @type {"E_DID_VERSION_NOT_FOUND"} */
+    this.code = DID_VERSION_NOT_FOUND;
+    /** @type {string | undefined} */
+    this.did = did;
+    /** @type {string | undefined} */
+    this.versionTime = versionTime;
+    /** @type {string | undefined} */
+    this.created = created;
+  }
+}
+
 const LOG_LABEL = "did:webvh log";
 const WITNESS_LABEL = "did:webvh witness file";
 const VM_LABEL = "did:webvh proof verification method";
@@ -118,12 +149,14 @@ export function webvhLogUrl(did, policy = {}) {
 }
 
 /**
- * Resolve a `did:webvh:…` identifier to its current DID document.
+ * Resolve a `did:webvh:…` identifier to its current DID document, or to
+ * the document in force at `options.versionTime`.
  *
  * Fetches `did.jsonl` (and `did-witness.json` when the log declares
  * witnesses) from the vetted host, walks the log, verifies the hash
  * chain and every Data Integrity proof, and returns the latest valid
- * `state`.
+ * `state` — or, with `versionTime`, the `state` of the last entry whose
+ * `versionTime` is at or before it (see {@link resolveLog}).
  *
  * @param {string} did
  * @param {Object} [options]
@@ -140,6 +173,9 @@ export function webvhLogUrl(did, policy = {}) {
  *   verifier. Defaults to `@noble/curves`. Mainly useful for tests
  *   that want to inject a failing verifier and confirm we propagate
  *   the error.
+ * @param {Date|string} [options.versionTime] - resolve the document as it
+ *   stood at this instant (an RFC 3339 date-time with an offset, or a
+ *   `Date`).
  * @returns {Promise<{
  *   didDocument: Object,
  *   didResolutionMetadata: Object,
@@ -147,8 +183,11 @@ export function webvhLogUrl(did, policy = {}) {
  * }>}
  * @throws {BlockedEndpointError} if the identifier's host, or the host of
  *   a did:webvh verification method inside its log, fails the policy.
+ * @throws {DidVersionNotFoundError} if `versionTime` precedes the DID's
+ *   creation.
  */
 export async function resolve(did, options = {}) {
+  const at = versionTimeOf(options);
   if (typeof did !== "string") {
     throw new TypeError("did:webvh resolve: input must be a string");
   }
@@ -183,8 +222,7 @@ export async function resolve(did, options = {}) {
   // for this DID. (The host can legitimately differ from the one we
   // fetched from when the DID is portable and has moved, which is why
   // there is no host equality check here.)
-  const result = await resolveDIDFromLog(log, { verifier, witnessProofs, scid: did.split(":")[2] });
-  return adaptResolutionResult(result);
+  return resolveVerified(log, { verifier, witnessProofs, scid: did.split(":")[2] }, at, did);
 }
 
 /**
@@ -202,8 +240,18 @@ export async function resolve(did, options = {}) {
  *   and upstream would otherwise fetch the file itself, unchecked.
  * @param {string} [options.scid] - bind the log to an expected SCID.
  * @param {Function} [options.verifier]
+ * @param {Date|string} [options.versionTime] - resolve the document as it
+ *   stood at this instant: the `state` of the last entry whose
+ *   `versionTime` is at or before it (did:webvh v1.0, *DID Resolution*).
+ *   The whole log is verified first, exactly as for current resolution —
+ *   SCID, hash chain, every entry's proof under the update keys in force,
+ *   pre-rotation commitments and every witness threshold — so a log that
+ *   would not resolve now does not resolve as of any time either.
+ * @throws {DidVersionNotFoundError} if `versionTime` precedes the log's
+ *   first entry.
  */
 export async function resolveLog(log, options = {}) {
+  const at = versionTimeOf(options);
   const policy = netPolicyOf(options);
   const witnessProofs = options.witnessProofs ?? [];
   if (!Array.isArray(witnessProofs)) {
@@ -220,8 +268,74 @@ export async function resolveLog(log, options = {}) {
   const verifier = options.verifier ?? (await defaultEd25519Verifier());
   const resolveOptions = { verifier, witnessProofs };
   if (options.scid) resolveOptions.scid = options.scid;
-  const result = await resolveDIDFromLog(log, resolveOptions);
-  return adaptResolutionResult(result);
+  return resolveVerified(log, resolveOptions, at);
+}
+
+// ─── Resolution as of a time ────────────────────────────────────────────
+
+// RFC 3339 `date-time`: a time zone is required, so the instant is never
+// read in the resolver's local zone.
+const RFC3339_DATE_TIME = /^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]\d{2}:\d{2})$/;
+
+/** `options.versionTime` as a `Date`, or undefined when absent. */
+function versionTimeOf(options) {
+  const value = options?.versionTime;
+  if (value === undefined) return undefined;
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) throw new TypeError("did:webvh: versionTime is an invalid Date");
+    return value;
+  }
+  if (typeof value === "string" && RFC3339_DATE_TIME.test(value)) {
+    const parsed = new Date(value);
+    if (!Number.isNaN(parsed.getTime())) return parsed;
+  }
+  throw new TypeError(
+    `did:webvh: versionTime must be a Date or an RFC 3339 date-time with an offset, not ${JSON.stringify(String(value).slice(0, 64))}`,
+  );
+}
+
+/**
+ * Verify `log` and return the current document, or the one in force at `at`.
+ *
+ * Why not `resolveDIDFromLog`'s own `versionTime` selector, which
+ * `didwebvh-ts` 2.8 has:
+ *
+ *   - it selects an entry only when the time is strictly after it and
+ *     strictly before the next one, so an instant equal to an entry's
+ *     `versionTime` selects nothing; the specification's rule is the last
+ *     entry at or before the instant;
+ *   - once it has selected an entry, any later failure is swallowed, and a
+ *     failure in the walk skips the witness checks that run after it, so a
+ *     log with a broken entry appended after the selected one would resolve
+ *     without its witness thresholds ever being counted.
+ *
+ * So the whole log is verified as current resolution verifies it, the entry
+ * is chosen here, and upstream is asked for that version by number — which
+ * shapes the document (the implicit `#files` / `#whois` services) exactly as
+ * a current resolution does.
+ */
+async function resolveVerified(log, resolveOptions, at, requested) {
+  const current = await resolveDIDFromLog(log, resolveOptions);
+  if (at === undefined) return adaptResolutionResult(current);
+  // A deactivated DID resolves now to no document, without an error; its
+  // earlier versions still resolve by time.
+  if (current?.meta?.error) adaptResolutionResult(current); // throws
+  const did = requested ?? current?.did;
+
+  // The walk above checked every `versionTime` parses and strictly increases.
+  let versionNumber = 0;
+  for (const entry of log) {
+    if (Date.parse(entry.versionTime) > at.getTime()) break;
+    versionNumber++;
+  }
+  if (versionNumber === 0) {
+    const created = log[0]?.versionTime;
+    throw new DidVersionNotFoundError(
+      `did:webvh resolve: ${did ?? "the DID"} has no version at ${at.toISOString()}: its log begins at ${created}`,
+      { ...(did ? { did } : {}), versionTime: at.toISOString(), ...(created ? { created } : {}) },
+    );
+  }
+  return adaptResolutionResult(await resolveDIDFromLog(log, { ...resolveOptions, versionNumber }));
 }
 
 /**
