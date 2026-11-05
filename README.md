@@ -171,6 +171,25 @@ A did:webvh host that merely *contains* `localhost` (say
 `didwebvh-ts` treats any such identifier as local and fetches it over
 plaintext `http`.
 
+### As of a time
+
+`did:webvh` and `did:scid` keep their history, so either resolves as it stood
+at an instant with `versionTime` (a `Date`, or an RFC 3339 date-time with an
+offset): the `state` of the last log entry whose `versionTime` is at or
+before it. The whole log is verified first, exactly as for a current
+resolution — hash chain, every entry's proof, pre-rotation and witness
+thresholds — so a log that would not resolve now does not resolve as of any
+time. An instant before the DID's first entry is refused with
+`DidVersionNotFoundError` (`code: "E_DID_VERSION_NOT_FOUND"`).
+
+```js
+const { didDocument } = await resolve(did, { versionTime: "2026-10-01T12:00:00Z" });
+```
+
+A resolution as of a time bypasses the resolver's cache both ways, and does
+not move a did:scid source book. `did:key` and `did:peer` ignore it: their
+document never changes.
+
 ### did:scid
 
 A `did:scid:vh:1` identity is the DID `did:scid:vh:1:<scid>`; its `src`

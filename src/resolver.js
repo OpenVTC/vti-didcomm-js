@@ -25,6 +25,13 @@
 // observed until the entry expires — set a short TTL or call
 // `invalidate(did)` after a known rotation.
 //
+// A call with `options.versionTime` (did:webvh and did:scid: the document
+// as it stood at that instant) bypasses the cache and the in-flight
+// de-duplication both, in either direction: a historical document must
+// never be served as the current one, nor the current one as historical.
+// Methods without history (did:key, did:peer) ignore it — their document
+// is a function of the identifier and never changes.
+//
 // Per-call `options` reach the method handler unchanged, which is how
 // `netPolicy` gets to did:webvh: `resolve(did, { netPolicy })` decides
 // which hosts that method's `did.jsonl` fetch may reach, and a DID
@@ -159,7 +166,9 @@ export function createResolver(
     // `parseMethod` also validates the DID shape, which must happen
     // whether or not the result is cacheable.
     const method = parseMethod(did);
-    if (ttl <= 0 || limit === 0 || UNCACHED_METHODS.has(method)) {
+    // A resolution as of a time is never cached, nor served from the cache:
+    // the cache keys on the DID alone and holds the current document.
+    if (options?.versionTime !== undefined || ttl <= 0 || limit === 0 || UNCACHED_METHODS.has(method)) {
       return rawResolve(did, options);
     }
 

@@ -334,7 +334,8 @@ export function createHandler(book = createScidSourceBook()) {
  *
  * @param {string} did
  * @param {Object} [options] - as for `./did-webvh.js` `resolve`; `netPolicy`
- *   applies to the `src` host.
+ *   applies to the `src` host, and `versionTime` resolves the document in
+ *   force at that instant.
  */
 export function resolve(did, options = {}) {
   return resolveWith(did, options, null);
@@ -373,7 +374,11 @@ async function resolveWith(did, options = {}, book) {
   const versionId = String(meta.versionId ?? "");
   const versionNumber = Number.parseInt(versionId.split("-")[0], 10);
 
-  if (book) book.accept(bare, source, Number.isFinite(versionNumber) ? versionNumber : 0, versionId);
+  // A resolution as of a past time says nothing about the latest version, so
+  // it neither advances the book nor is held against it.
+  if (book && options?.versionTime === undefined) {
+    book.accept(bare, source, Number.isFinite(versionNumber) ? versionNumber : 0, versionId);
+  }
 
   return {
     didDocument: document,
