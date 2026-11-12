@@ -83,6 +83,10 @@
       "types": "./types/did-scid.d.ts",
       "import": "./src/did-scid.js"
     },
+    "./did-webs": {
+      "types": "./types/did-webs.d.ts",
+      "import": "./src/did-webs.js"
+    },
     "./resolver": {
       "types": "./types/resolver.d.ts",
       "import": "./src/resolver.js"
@@ -143,6 +147,8 @@
     "did",
     "did:webvh",
     "did:scid",
+    "did:webs",
+    "keri",
     "did:key",
     "did:peer",
     "authcrypt",
@@ -156,6 +162,7 @@
   },
   "dependencies": {
     "@noble/curves": "^2.4.0",
+    "@noble/hashes": "^2.4.0",
     "didwebvh-ts": "^2.8.0"
   },
   "devDependencies": {

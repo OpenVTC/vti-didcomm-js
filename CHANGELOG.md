@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`did:webs` resolution** (VTI-KEY-003), registered with the default
+  resolver and as the `./did-webs` subpath. Pure JavaScript: a port of
+  `affinidi-did-webs` 0.13.3 and the `affinidi-keri-core` 0.8.1 it verifies
+  with. Fetches `keri.cesr` and `did.json` through the egress guard (no
+  redirects, 4 MiB each, read with a cap; a timeout), verifies the whole key
+  event stream — KERI 1.0 and 2.0, JSON and native CESR bodies, both counter
+  tables; SAIDs and field lists; simple and weighted thresholds; pre-rotation;
+  witness receipts; delegation; superseding recovery — reads the designations
+  anchored in it (aliases, key agreement, services, key roles) from 1.x TELs
+  and 2.x blindable registries, derives the document, and refuses a `did.json`
+  that disagrees. `versionId` DID URLs resolve as of a key event. Conformance
+  is checked against vectors recorded from the Rust crate.
+- `resolve` refuses a deactivated did:webs identifier (`kind: "Deactivated"`);
+  `resolveFromArtifacts` returns it with `deactivated: true` and, at the
+  deactivating version, a document without keys.
+- `DidWebsError` (`code: "E_DID_WEBS"`, `kind` the Rust error variant) and
+  `DID_WEBS_ERROR`, exported.
+- `@noble/hashes` is a direct dependency (it was already installed through
+  `@noble/curves`).
+
 ## [0.14.0] - 2026-11-05
 
 ### Added
