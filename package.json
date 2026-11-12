@@ -23,6 +23,10 @@
       "types": "./types/jwk.d.ts",
       "import": "./src/jwk.js"
     },
+    "./verification-method": {
+      "types": "./types/verification-method.d.ts",
+      "import": "./src/verification-method.js"
+    },
     "./concat-kdf": {
       "types": "./types/concat-kdf.d.ts",
       "import": "./src/concat-kdf.js"

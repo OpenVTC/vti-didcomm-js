@@ -45,6 +45,7 @@ import { assertSafeEndpoint, guardedFetch } from "./net-guard.js";
 import * as multibase from "./multibase.js";
 import * as jwk from "./jwk.js";
 import * as x25519 from "./x25519.js";
+import { x25519KeyAgreement } from "./verification-method.js";
 
 // Canonical Trust-Task message-type URIs the current VTA accepts on the
 // DIDComm-envelope auth path (`vta-service/src/routes/auth.rs`). The legacy
@@ -372,30 +373,10 @@ async function resolveVtaRecipient(vtaDid) {
       `vta-rest-auth: could not resolve a DID document for ${vtaDid} (resolver returned no document)`,
     );
   }
-  const ka = didDocument.keyAgreement;
-  if (!ka || ka.length === 0) {
-    throw new Error(`vta-rest-auth: ${vtaDid} has no keyAgreement entries`);
-  }
-  // Resolve the first entry — either embedded VM object or a ref into
-  // verificationMethod[].
-  let vm = ka[0];
-  if (typeof vm === "string") {
-    const found = (didDocument.verificationMethod ?? []).find((v) => v.id === vm);
-    if (!found) {
-      throw new Error(`vta-rest-auth: keyAgreement reference ${vm} not in verificationMethod[]`);
-    }
-    vm = found;
-  }
-  if (!vm.publicKeyMultibase) {
-    throw new Error("vta-rest-auth: keyAgreement entry has no publicKeyMultibase (only Multikey supported)");
-  }
-  const { codec, key } = multibase.decodeMultikey(vm.publicKeyMultibase);
-  if (codec[0] !== 0xec || codec[1] !== 0x01) {
-    throw new Error(
-      `vta-rest-auth: keyAgreement is not X25519 (multicodec 0x${codec[0].toString(16)}${codec[1].toString(16)})`,
-    );
-  }
-  return { kid: vm.id, x25519Pub: key };
+  // Chosen by relationship and read from either encoding: a did:webs VTA
+  // publishes `JsonWebKey` methods, and with key roles its keyAgreement key
+  // is a designated X25519 key distinct from its signing keys.
+  return x25519KeyAgreement(didDocument, vtaDid, { label: "vta-rest-auth" });
 }
 
 function defaultClientKid(did, x25519Public) {

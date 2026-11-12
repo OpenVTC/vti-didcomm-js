@@ -23,7 +23,7 @@ import { authenticateToMediator } from "./mediator-auth.js";
 import { MediatorSession } from "./mediator-transport.js";
 import * as multibase from "./multibase.js";
 import * as jwk from "./jwk.js";
-import { sameReference } from "./did-scid.js";
+import { x25519KeyAgreement } from "./verification-method.js";
 
 /**
  * Connect to a VTA via its mediator and return a client for
@@ -203,7 +203,8 @@ export class VtaMediatorClient {
 // ─── Internals ──────────────────────────────────────────────────────────
 
 /**
- * Resolve a DID and extract its first X25519 keyAgreement key.
+ * Resolve a DID and extract its first X25519 keyAgreement key (by
+ * relationship, in document order; `publicKeyMultibase` or `publicKeyJwk`).
  *
  * @param {string} did
  * @param {Object} [options]
@@ -218,26 +219,7 @@ export async function resolveX25519KeyAgreement(did, { netPolicy } = {}) {
   if (!didDocument || typeof didDocument !== "object") {
     throw new Error(`vta-didcomm: could not resolve a DID document for ${did}`);
   }
-  const ka = didDocument.keyAgreement;
-  if (!ka || ka.length === 0) {
-    throw new Error(`vta-didcomm: ${did} has no keyAgreement entries`);
-  }
-  let vm = ka[0];
-  if (typeof vm === "string") {
-    const found = (didDocument.verificationMethod ?? []).find((v) => sameReference(v.id, vm));
-    if (!found) throw new Error(`vta-didcomm: keyAgreement ref ${vm} not resolvable`);
-    vm = found;
-  }
-  if (!vm.publicKeyMultibase) {
-    throw new Error("vta-didcomm: keyAgreement entry has no publicKeyMultibase");
-  }
-  const { codec, key } = multibase.decodeMultikey(vm.publicKeyMultibase);
-  if (codec[0] !== 0xec || codec[1] !== 0x01) {
-    throw new Error(
-      `vta-didcomm: keyAgreement not X25519 (multicodec 0x${codec[0].toString(16)}${codec[1].toString(16)})`,
-    );
-  }
-  return { kid: vm.id, x25519Pub: key };
+  return x25519KeyAgreement(didDocument, did, { label: "vta-didcomm" });
 }
 
 /**
@@ -256,24 +238,7 @@ export async function resolveX25519KeyAgreementKey(did, kid, { netPolicy } = {})
   if (!didDocument || typeof didDocument !== "object") {
     throw new Error(`vta-didcomm: could not resolve a DID document for ${did}`);
   }
-  const abs = (id) => (typeof id === "string" && id.startsWith("#") ? `${did}${id}` : id);
-  const methods = didDocument.verificationMethod ?? [];
-  let vm;
-  for (const entry of didDocument.keyAgreement ?? []) {
-    const id = abs(typeof entry === "string" ? entry : entry?.id);
-    if (!sameReference(id, kid)) continue;
-    vm = typeof entry === "string" ? methods.find((v) => sameReference(abs(v.id), kid)) : entry;
-    break;
-  }
-  if (!vm) throw new Error(`vta-didcomm: ${did} lists no keyAgreement key ${kid}`);
-  if (!vm.publicKeyMultibase) {
-    throw new Error("vta-didcomm: keyAgreement entry has no publicKeyMultibase");
-  }
-  const { codec, key } = multibase.decodeMultikey(vm.publicKeyMultibase);
-  if (codec[0] !== 0xec || codec[1] !== 0x01) {
-    throw new Error("vta-didcomm: keyAgreement key is not X25519");
-  }
-  return { kid, x25519Pub: key };
+  return x25519KeyAgreement(didDocument, did, { kid, label: "vta-didcomm" });
 }
 
 function defaultClientKid(did, x25519Public) {

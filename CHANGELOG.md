@@ -28,6 +28,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `DID_WEBS_ERROR`, exported.
 - `@noble/hashes` is a direct dependency (it was already installed through
   `@noble/curves`).
+- **Authenticating and encrypting to a did:webs party.** A did:webs document
+  carries `JsonWebKey` verification methods (`publicKeyJwk`, ids
+  `<did>#<CESR key>`), which every auth path read as "no
+  publicKeyMultibase". `./verification-method` (also `verificationMethod` on
+  the root export) is now the one place a verification method becomes key
+  bytes: `publicKeyOf(vm)` reads `publicKeyJwk` (`JsonWebKey`,
+  `JsonWebKey2020`: OKP Ed25519 / X25519, EC P-256) and `publicKeyMultibase`
+  (`Multikey`, `Ed25519VerificationKey2020`, `X25519KeyAgreementKey2020` /
+  `2019`; a compressed P-256 multikey is decompressed); `selectKey(doc, did,
+  relationship, { kid, curves })` chooses a key by its verification
+  relationship, through references (absolute or relative) or embedded
+  methods; `x25519KeyAgreement(doc, did, { kid })` is the X25519
+  `keyAgreement` key. Mediator auth (`parseMediatorEndpoints`), VTA REST auth
+  and the VTA DIDComm client (`resolveX25519KeyAgreement`,
+  `resolveX25519KeyAgreementKey`, and so its inbound-sender lookup) use it,
+  and the `kid` / `skid` they write is the document's own id.
+- `p256.uncompressedPoint`: a 33- or 65-byte SEC1 point as the 65-byte form.
+
+### Changed
+
+- The X25519 `keyAgreement` key a client packs to is the first **X25519**
+  entry of `keyAgreement`, not the first entry: a did:webs VTA with key roles
+  may list a P-256 key ahead of it, which used to fail. An entry of another
+  curve or of a type this library cannot read is passed over, never used; a
+  key named by `kid` (an inbound `skid`) is used or refused, never substituted.
+- Verification methods fail closed: an unknown or missing `type`, a type
+  without its encoding, both encodings at once, a curve without a primitive
+  here (secp256k1, P-384), a curve the type contradicts, a JWK carrying `d`,
+  or a method marked `revoked` is refused. Before, a method was read by its
+  `publicKeyMultibase` whatever its `type`.
+- VTA REST auth resolves a relative `keyAgreement` reference against the VTA's
+  DID (it compared ids exactly, so `#key-1` was not found).
 
 ## [0.14.0] - 2026-11-05
 

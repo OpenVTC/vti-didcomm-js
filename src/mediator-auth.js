@@ -44,7 +44,7 @@ import { pack } from "./pack.js";
 import { assertSafeEndpoint, guardedFetch } from "./net-guard.js";
 import * as multibase from "./multibase.js";
 import * as jwk from "./jwk.js";
-import { sameReference } from "./did-scid.js";
+import { x25519KeyAgreement } from "./verification-method.js";
 
 const AUTH_MESSAGE_TYPE = "https://affinidi.com/atm/1.0/authenticate";
 
@@ -311,27 +311,10 @@ function mergeNetPolicy(netPolicy, legacyAllowInsecure) {
   };
 }
 
+// The mediator's X25519 keyAgreement key, chosen by relationship and read
+// from either encoding (did:webs publishes `JsonWebKey` methods).
 function extractX25519KeyAgreement(didDocument, did) {
-  const ka = didDocument.keyAgreement;
-  if (!ka || ka.length === 0) {
-    throw new Error(`mediator-auth: ${did} has no keyAgreement entries`);
-  }
-  let vm = ka[0];
-  if (typeof vm === "string") {
-    const found = (didDocument.verificationMethod ?? []).find((v) => sameReference(v.id, vm));
-    if (!found) throw new Error(`mediator-auth: keyAgreement ref ${vm} not resolvable`);
-    vm = found;
-  }
-  if (!vm.publicKeyMultibase) {
-    throw new Error("mediator-auth: keyAgreement entry has no publicKeyMultibase");
-  }
-  const { codec, key } = multibase.decodeMultikey(vm.publicKeyMultibase);
-  if (codec[0] !== 0xec || codec[1] !== 0x01) {
-    throw new Error(
-      `mediator-auth: keyAgreement not X25519 (multicodec 0x${codec[0].toString(16)}${codec[1].toString(16)})`,
-    );
-  }
-  return { kid: vm.id, x25519Pub: key };
+  return x25519KeyAgreement(didDocument, did, { label: "mediator-auth" });
 }
 
 function serviceTypeIncludes(service, wanted) {

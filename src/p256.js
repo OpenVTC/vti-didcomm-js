@@ -111,3 +111,19 @@ export function pointFromCoordinates(x, y) {
   p256.Point.fromBytes(point);
   return point;
 }
+
+/**
+ * The uncompressed SEC1 form (0x04 || X || Y) of a P-256 public key given
+ * compressed (33 bytes) or uncompressed (65 bytes) — the form a multikey
+ * carries and the form `key-agreement.js` / `jwk.js` take. Throws when the
+ * bytes are not a point on the curve.
+ *
+ * @param {Uint8Array} publicKey - 33- or 65-byte SEC1 point
+ * @returns {Uint8Array} 65-byte uncompressed SEC1 point
+ */
+export function uncompressedPoint(publicKey) {
+  if (!(publicKey instanceof Uint8Array) || (publicKey.length !== 33 && publicKey.length !== UNCOMPRESSED_LEN)) {
+    throw new TypeError("P-256 public key must be a 33- or 65-byte SEC1 point");
+  }
+  return p256.Point.fromBytes(publicKey).toBytes(false);
+}
