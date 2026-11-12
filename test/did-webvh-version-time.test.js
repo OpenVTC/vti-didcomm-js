@@ -47,7 +47,21 @@ function keypair() {
   };
 }
 
-const assertionKey = (k) => ({ type: "Multikey", publicKeyMultibase: k.multikey, purpose: "assertionMethod" });
+/**
+ * A complete did:webvh document (didwebvh-ts 3 takes one rather than a key
+ * list) whose only verification method is `k` as an assertion key. `{DID}`
+ * is filled in by `createDID`; an update passes the real `did`.
+ */
+const docWith = (k, did = "{DID}") => {
+  const id = `${did}#${k.multikey.slice(-8)}`;
+  return {
+    "@context": ["https://www.w3.org/ns/did/v1", "https://w3id.org/security/multikey/v1"],
+    id: did,
+    controller: did,
+    verificationMethod: [{ id, type: "Multikey", controller: did, publicKeyMultibase: k.multikey }],
+    assertionMethod: [id],
+  };
+};
 
 /** Whole seconds, as a log's `versionTime` carries them. */
 const at = (ms) => new Date(Math.floor(ms / 1000) * 1000);
@@ -68,7 +82,7 @@ async function rotatedLog() {
     address: "example.com",
     signer: update.signer,
     updateKeys: [update.multikey],
-    verificationMethods: [assertionKey(a)],
+    didDocument: docWith(a),
     created: iso(T0),
     verifier,
   });
@@ -76,7 +90,7 @@ async function rotatedLog() {
     log: created.log,
     signer: update.signer,
     updateKeys: [update.multikey],
-    verificationMethods: [assertionKey(b)],
+    didDocument: docWith(b, created.did),
     updated: iso(T1),
     verifier,
   });
@@ -179,7 +193,7 @@ test("versionTime: a pre-rotation log resolves as of before its rotation, with t
     signer: k1.signer,
     updateKeys: [k1.multikey],
     nextKeyHashes: [await deriveNextKeyHash(k2.multikey)],
-    verificationMethods: [assertionKey(a)],
+    didDocument: docWith(a),
     created: iso(T0),
     verifier,
   });
@@ -188,7 +202,7 @@ test("versionTime: a pre-rotation log resolves as of before its rotation, with t
     signer: k2.signer,
     updateKeys: [k2.multikey],
     nextKeyHashes: [],
-    verificationMethods: [assertionKey(b)],
+    didDocument: docWith(b, created.did),
     updated: iso(T1),
     verifier,
   });
@@ -199,6 +213,19 @@ test("versionTime: a pre-rotation log resolves as of before its rotation, with t
   assert.deepEqual(then.didDocumentMetadata.updateKeys, [k1.multikey], "the update keys in force then");
 });
 
+/** A witness proof over `versionId` by `k`, which signWitnessProofEntry would not make. */
+async function strangerProof(versionId, k) {
+  const proof = {
+    type: "DataIntegrityProof",
+    cryptosuite: "eddsa-jcs-2022",
+    verificationMethod: k.signer.getVerificationMethodId(),
+    created: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+    proofPurpose: "assertionMethod",
+  };
+  const { proofValue } = await k.signer.sign({ document: { versionId }, proof });
+  return { versionId, proof: [{ ...proof, proofValue }] };
+}
+
 test("versionTime: witness thresholds apply to a historical resolution", async () => {
   const update = keypair();
   const witness = keypair();
@@ -207,16 +234,18 @@ test("versionTime: witness thresholds apply to a historical resolution", async (
     address: "example.com",
     signer: update.signer,
     updateKeys: [update.multikey],
-    verificationMethods: [assertionKey(keypair())],
+    didDocument: docWith(keypair()),
     witness: { threshold: 1, witnesses: [{ id: witnessDid }] },
     created: iso(T0),
     verifier,
   });
   const proofs = [
     await signWitnessProofEntry({
-      versionId: created.log[0].versionId,
-      witnesses: [{ id: witnessDid }],
-      witnessSignersByDid: { [witnessDid]: witness.signer },
+      trustedLog: [],
+      candidateLog: created.log,
+      witnessSigner: witness.signer,
+      witnessProofs: [],
+      verifier,
     }),
   ];
   const now = new Date();
@@ -224,13 +253,10 @@ test("versionTime: witness thresholds apply to a historical resolution", async (
   assert.equal(ok.didDocumentMetadata.versionId, created.log[0].versionId);
 
   const stranger = keypair();
-  const strangerDid = `did:key:${stranger.multikey}`;
   const unwitnessed = [
-    await signWitnessProofEntry({
-      versionId: created.log[0].versionId,
-      witnesses: [{ id: strangerDid }],
-      witnessSignersByDid: { [strangerDid]: stranger.signer },
-    }),
+    // `signWitnessProofEntry` refuses a signer outside the witness list,
+    // so the stranger's otherwise well-formed proof is made by hand.
+    await strangerProof(created.log[0].versionId, stranger),
   ];
   await assert.rejects(
     () => didWebvh.resolveLog(created.log, { versionTime: now, witnessProofs: unwitnessed }),

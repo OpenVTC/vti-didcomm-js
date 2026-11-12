@@ -45,12 +45,24 @@ export async function webvhLog(address, { alsoKnownAs } = {}) {
   const kaPrivate = x25519.utils.randomSecretKey();
   const kaMultikey = encodeMultikey(X25519_PUB, x25519.getPublicKey(kaPrivate));
 
+  // didwebvh-ts 3 takes the complete initial document; `{DID}` is
+  // replaced with the identifier once the SCID is known. The key-agreement
+  // method keeps the `#<last 8 of the multibase>` id 2.x generated.
+  const kaId = `{DID}#${kaMultikey.slice(-8)}`;
+  const didDocument = {
+    "@context": ["https://www.w3.org/ns/did/v1", "https://w3id.org/security/multikey/v1"],
+    id: "{DID}",
+    controller: "{DID}",
+    verificationMethod: [{ id: kaId, type: "Multikey", controller: "{DID}", publicKeyMultibase: kaMultikey }],
+    keyAgreement: [kaId],
+    ...(alsoKnownAs ? { alsoKnownAs } : {}),
+  };
+
   const created = await createDID({
     address,
     signer,
     updateKeys: [multikey],
-    verificationMethods: [{ type: "Multikey", publicKeyMultibase: kaMultikey, purpose: "keyAgreement" }],
-    ...(alsoKnownAs ? { alsoKnownAs } : {}),
+    didDocument,
     verifier,
   });
 
@@ -66,7 +78,9 @@ export async function webvhLog(address, { alsoKnownAs } = {}) {
       return entries.map((entry) => JSON.stringify(entry)).join("\n");
     },
     async update(alsoKnownAs) {
-      const updated = await updateDID({ log, signer, updateKeys: [multikey], alsoKnownAs, verifier });
+      // A 3.x update takes the complete next document rather than merging.
+      const didDocument = { ...log[log.length - 1].state, alsoKnownAs };
+      const updated = await updateDID({ log, signer, updateKeys: [multikey], didDocument, verifier });
       log = updated.log;
       return log;
     },

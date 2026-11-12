@@ -34,7 +34,7 @@ export const BLOCKED_ENDPOINT = "E_BLOCKED_ENDPOINT";
 
 /**
  * Why an endpoint was refused.
- * @typedef {"invalid_url" | "scheme" | "userinfo" | "private_address" | "private_name" | "not_allowlisted" | "redirect"} BlockedReason
+ * @typedef {"invalid_url" | "scheme" | "userinfo" | "private_address" | "private_name" | "not_allowlisted" | "redirect" | "library_fetch"} BlockedReason
  */
 
 /**
