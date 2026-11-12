@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`didwebvh-ts` 3.0** (from 2.8). did:webvh and did:scid resolution is
+  ported to its W3C DID Resolution result shape; resolved documents and
+  metadata are unchanged for callers. The library is now handed a `fetch`
+  that refuses every call, so all did:webvh I/O stays behind the egress
+  guard (a refusal is a `BlockedEndpointError` with reason
+  `"library_fetch"`).
+
+### Removed
+
+- **A did:webvh whose host is `localhost` no longer resolves**, whatever
+  `netPolicy` says: `didwebvh-ts` 3 requires a fully qualified domain, so a
+  log for `did:webvh:<scid>:localhost%3A8000` fails verification. Local
+  development needs an FQDN host (an `/etc/hosts` name, say). A did:scid
+  whose log names an FQDN can still be fetched from `src=localhost:<port>`
+  under a private-host policy.
+
 ## [0.15.0] - 2026-11-12
 
 ### Added
