@@ -6,7 +6,7 @@ inputs and its answer. `test/did-webs-conformance.test.js` and
 answer: the same document and metadata where Rust accepts, a refusal of the
 same `DidWebsError` kind where it refuses.
 
-- Crate: `affinidi-did-webs` 0.13.3, affinidi-tdk-rs commit `68e6b032`
+- Crate: `affinidi-did-webs` 0.13.3 (crates.io; affinidi-tdk-rs commit `68e6b032`)
   (`affinidi-keri-core` / `affinidi-keri-crypto` 0.8.1, `affinidi-cesr`
   0.1.4), feature `create`.
 - `<name>.jsonl` — every resolution, key state, endpoint set and designation
