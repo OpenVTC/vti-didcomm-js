@@ -1,0 +1,52 @@
+[
+ {
+  "versionId": "1-QmSogvF7UZ9cSjftSkJinN3xGX3EvXHAkgBmeoZHEPisks",
+  "versionTime": "2026-11-12T10:59:33Z",
+  "parameters": {
+   "method": "did:webvh:1.0",
+   "scid": "QmeCjBjtkTgWjf2B7RD7GKCyhEavbCvWr1UHWhPgVi991R",
+   "updateKeys": [
+    "z6Mkjk6PAkoiZa1aDn7aoH33b6CNLiqDVfnfTMuL9MkLSAhF"
+   ],
+   "portable": false,
+   "nextKeyHashes": [],
+   "watchers": [],
+   "witness": {},
+   "deactivated": false
+  },
+  "state": {
+   "@context": [
+    "https://www.w3.org/ns/did/v1",
+    "https://w3id.org/security/multikey/v1"
+   ],
+   "id": "did:webvh:QmeCjBjtkTgWjf2B7RD7GKCyhEavbCvWr1UHWhPgVi991R:localhost%3A8000",
+   "controller": "did:webvh:QmeCjBjtkTgWjf2B7RD7GKCyhEavbCvWr1UHWhPgVi991R:localhost%3A8000",
+   "verificationMethod": [
+    {
+     "type": "Multikey",
+     "publicKeyMultibase": "z6LSqEPQmZEsJxGdQ7izNKL19HUkn3cMjj7VrDFFCSA3mnb1",
+     "purpose": "keyAgreement",
+     "id": "did:webvh:QmeCjBjtkTgWjf2B7RD7GKCyhEavbCvWr1UHWhPgVi991R:localhost%3A8000#CSA3mnb1",
+     "controller": "did:webvh:QmeCjBjtkTgWjf2B7RD7GKCyhEavbCvWr1UHWhPgVi991R:localhost%3A8000"
+    }
+   ],
+   "authentication": [],
+   "assertionMethod": [],
+   "keyAgreement": [
+    "did:webvh:QmeCjBjtkTgWjf2B7RD7GKCyhEavbCvWr1UHWhPgVi991R:localhost%3A8000#CSA3mnb1"
+   ],
+   "capabilityDelegation": [],
+   "capabilityInvocation": []
+  },
+  "proof": [
+   {
+    "type": "DataIntegrityProof",
+    "cryptosuite": "eddsa-jcs-2022",
+    "verificationMethod": "did:key:z6Mkjk6PAkoiZa1aDn7aoH33b6CNLiqDVfnfTMuL9MkLSAhF#z6Mkjk6PAkoiZa1aDn7aoH33b6CNLiqDVfnfTMuL9MkLSAhF",
+    "created": "2026-11-12T10:59:33Z",
+    "proofPurpose": "assertionMethod",
+    "proofValue": "zRmautp9aR8UMZGrgVcP2W5kLoKU5DM4FioEVGFzyHVMsw9iBGZ9538J9Qwe6MmnYAovQaNem7CvrafHR8yZj3R7"
+   }
+  ]
+ }
+]

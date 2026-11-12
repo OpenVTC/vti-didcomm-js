@@ -8,34 +8,27 @@
 // case — `unpackInbound` resolves it *before* anything about the frame
 // has been authenticated — so any party that can route a frame through
 // the mediator chooses a host this client will GET. That host has to be
-// checked before it is dialed, and `didwebvh-ts` 2.7.4 dials through the
-// global `fetch` at three points with nothing to inject:
+// checked before it is dialed.
 //
-//   - `fetchLogFromIdentifier` → `<base>/did.jsonl`
-//   - `fetchWitnessProofs` → `<base>/did-witness.json`
-//   - `resolveVM` → another did:webvh named in a log entry's
-//     `proof[].verificationMethod`
+// So the I/O stays here: compute the log URL, vet it with `net-guard`,
+// fetch through `guardedFetch`, and hand the log to the library's
+// exported `resolveDIDFromLog` with `witnessProofs` already supplied.
+// `didwebvh-ts` 3 accepts an injected `fetch` (upstream #158), and we pass
+// one that refuses every call, so the library cannot dial anything even if
+// a future version grows a new egress point.
 //
-// We take the first two over: compute the log URL here, vet it with
-// `net-guard`, fetch through `guardedFetch`, and hand the log to the
-// library's exported `resolveDIDFromLog` with `witnessProofs` already
-// supplied so its own fetch never runs. The third cannot be intercepted,
-// so every nested did:webvh verification method in the log (and in the
-// witness file) is pre-scanned and its host vetted *before* the log is
-// handed over. That is host-level only: the library builds the nested URL
-// with its own `getBaseUrl`, so it may still fetch a vetted host over
-// plaintext. Both gaps close upstream.
+// 3.x also dropped the two behaviours this module used to work around: it
+// no longer resolves a did:webvh named as a proof's verificationMethod
+// (only `did:key` is accepted), and it no longer downgrades to plaintext
+// for an identifier that merely contains `localhost` (upstream #185). The
+// nested-method pre-scan below is kept as a cheap, policy-level refusal
+// that does not depend on that upstream behaviour.
 //
-// Its `getBaseUrl` also picks plaintext `http` when the identifier merely
-// *contains* `localhost`, which covers `localhost.attacker.example` too.
-// `webvhLogUrl` downgrades only for an exact `localhost` host, and only
-// when the policy admits private hosts at all.
-//
-// Upstream, so the pre-scan and this URL copy can eventually go away:
-//   - injectable fetch for all three egress points:
-//     https://github.com/decentralized-identity/didwebvh-ts/issues/158
-//   - the substring-`localhost` plaintext downgrade:
-//     https://github.com/decentralized-identity/didwebvh-ts/issues/185
+// 3.x requires a did:webvh host to be a fully qualified domain, so a log
+// whose DID names bare `localhost` no longer verifies whatever the egress
+// policy says. `webvhLogUrl` still builds and vets such a URL (an
+// exact-`localhost` plaintext downgrade, only when the policy admits
+// private hosts), but the library then refuses the log.
 //
 // If we ever need to vendor the implementation (e.g. for a strict
 // Content Security Policy), the swap-out point is still this module.
@@ -222,7 +215,7 @@ export async function resolve(did, options = {}) {
   // for this DID. (The host can legitimately differ from the one we
   // fetched from when the DID is portable and has moved, which is why
   // there is no host equality check here.)
-  return resolveVerified(log, { verifier, witnessProofs, scid: did.split(":")[2] }, at, did);
+  return resolveVerified(log, { verifier, witnessProofs, scid: did.split(":")[2], fetch: refuseFetch }, at, did);
 }
 
 /**
@@ -266,7 +259,7 @@ export async function resolveLog(log, options = {}) {
   assertNestedVerificationMethods(log, witnessProofs, policy);
 
   const verifier = options.verifier ?? (await defaultEd25519Verifier());
-  const resolveOptions = { verifier, witnessProofs };
+  const resolveOptions = { verifier, witnessProofs, fetch: refuseFetch };
   if (options.scid) resolveOptions.scid = options.scid;
   return resolveVerified(log, resolveOptions, at);
 }
@@ -297,8 +290,8 @@ function versionTimeOf(options) {
 /**
  * Verify `log` and return the current document, or the one in force at `at`.
  *
- * Why not `resolveDIDFromLog`'s own `versionTime` selector, which
- * `didwebvh-ts` 2.8 has:
+ * Why not `resolveDIDFromLog`'s own `versionTime` selector? In
+ * `didwebvh-ts` 2.8:
  *
  *   - it selects an entry only when the time is strictly after it and
  *     strictly before the next one, so an instant equal to an entry's
@@ -308,6 +301,9 @@ function versionTimeOf(options) {
  *     failure in the walk skips the witness checks that run after it, so a
  *     log with a broken entry appended after the selected one would resolve
  *     without its witness thresholds ever being counted.
+ *
+ * 3.x reworked that walk; selecting here keeps the rule ours and pinned by
+ * our tests rather than by whichever upstream version is installed.
  *
  * So the whole log is verified as current resolution verifies it, the entry
  * is chosen here, and upstream is asked for that version by number — which
@@ -319,8 +315,8 @@ async function resolveVerified(log, resolveOptions, at, requested) {
   if (at === undefined) return adaptResolutionResult(current);
   // A deactivated DID resolves now to no document, without an error; its
   // earlier versions still resolve by time.
-  if (current?.meta?.error) adaptResolutionResult(current); // throws
-  const did = requested ?? current?.did;
+  if (current?.didResolutionMetadata?.error) adaptResolutionResult(current); // throws
+  const did = requested ?? current?.didDocument?.id ?? log.at(-1)?.state?.id;
 
   // The walk above checked every `versionTime` parses and strictly increases.
   let versionNumber = 0;
@@ -336,6 +332,18 @@ async function resolveVerified(log, resolveOptions, at, requested) {
     );
   }
   return adaptResolutionResult(await resolveDIDFromLog(log, { ...resolveOptions, versionNumber }));
+}
+
+/**
+ * The `fetch` handed to `didwebvh-ts`: every byte it needs is supplied up
+ * front, so any attempt to dial is a bug, refused rather than routed to
+ * the global fetch.
+ */
+async function refuseFetch(input) {
+  throw new BlockedEndpointError(
+    `net-guard: did:webvh library fetch of ${String(input).slice(0, 120)} refused: all did:webvh I/O goes through the egress guard`,
+    { reason: "library_fetch", label: "didwebvh-ts" },
+  );
 }
 
 /**
@@ -447,9 +455,10 @@ function declaresWitnesses(log) {
 }
 
 // Every did:webvh named as a proof's verificationMethod, in the log and
-// in the witness file. `didwebvh-ts` `resolveVM` fetches each of these
-// itself, through the global fetch, so their hosts are vetted here
-// before the log is handed over.
+// in the witness file. `didwebvh-ts` 2.x fetched each of these itself
+// through the global fetch; 3.x refuses them outright. Vetting their hosts
+// here keeps the refusal a policy decision with a `BlockedEndpointError`,
+// independent of the installed upstream version.
 function nestedWebvhVerificationMethods(log, witnessProofs) {
   const dids = new Set();
   const collect = (proofs) => {
@@ -471,31 +480,32 @@ function assertNestedVerificationMethods(log, witnessProofs, policy) {
 }
 
 /**
- * Map `didwebvh-ts`'s `{did, doc, meta}` shape onto the W3C DID
- * Resolution result shape we use elsewhere in this library.
+ * Check a `didwebvh-ts` 3 W3C DID Resolution result and return it in the
+ * shape this library's resolvers share.
  *
- * `resolveDIDFromLog` throws on a verification failure, but it can also
- * return a result whose `meta.error` carries the reason and whose `doc`
- * is empty/null. We turn that into a thrown error so callers don't trip
+ * `resolveDIDFromLog` no longer throws on a verification failure: it
+ * returns `didResolutionMetadata.error` with the reason and a null
+ * `didDocument`. We turn that into a thrown error so callers don't trip
  * over a null `didDocument` downstream with an opaque "Cannot read
  * properties of null" message.
  */
 function adaptResolutionResult(result) {
-  const err = result?.meta?.error;
+  const resolutionMeta = result?.didResolutionMetadata ?? {};
+  const err = resolutionMeta.error;
   if (err) {
-    const detail = result?.meta?.problemDetails?.detail;
+    const detail = resolutionMeta.problemDetails?.detail ?? resolutionMeta.message;
     throw new Error(
       `did:webvh resolve failed: ${err}${detail ? ` — ${detail}` : ""}`,
     );
   }
-  if (!result?.doc || typeof result.doc !== "object") {
+  if (!result?.didDocument || typeof result.didDocument !== "object") {
     throw new Error(
       "did:webvh resolve: resolver returned no DID document (and no error) — the log may be empty or unreachable",
     );
   }
   return {
-    didDocument: result.doc,
+    didDocument: result.didDocument,
     didResolutionMetadata: { contentType: "application/did+ld+json" },
-    didDocumentMetadata: result.meta ?? {},
+    didDocumentMetadata: result.didDocumentMetadata ?? {},
   };
 }

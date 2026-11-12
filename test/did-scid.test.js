@@ -11,6 +11,7 @@
 // affinidi_did_common::scid and didwebvh-rs did_web.rs.
 
 import { test } from "node:test";
+import { readFile } from "node:fs/promises";
 import assert from "node:assert/strict";
 
 import {
@@ -296,14 +297,31 @@ test("resolve: the host guard applies to the src host", async () => {
 });
 
 test("resolve: under a private-host policy, src=localhost:<port> is fetched over http", async () => {
-  const { served, did, url } = await servedLog("localhost:8000");
-  assert.equal(url, `${did}?src=localhost%3A8000`);
+  const { served, did } = await servedLog();
   const literal = `${did}?src=localhost:8000`;
   const { didDocument } = await createResolver().resolve(literal, {
     fetch: served.fetch,
     netPolicy: { allowPrivate: true, allowInsecure: true },
   });
   assert.equal(didDocument.id, did);
+  assert.deepEqual(served.calls, ["http://localhost:8000/.well-known/did.jsonl"]);
+});
+
+test("resolve: a log whose DID names localhost is refused, whatever the policy", async () => {
+  // didwebvh-ts 3 requires a did:webvh host to be a fully qualified domain,
+  // so `did:webvh:<scid>:localhost%3A8000` (which didwebvh-rs accepts for
+  // local development) no longer verifies here. `createDID` refuses the
+  // address too, so the log is a recorded one made with didwebvh-ts 2.8.
+  const log = JSON.parse(await readFile(new URL("./fixtures/did-webvh/localhost-log.json", import.meta.url), "utf8"));
+  const served = logFetch(() => log.map((entry) => JSON.stringify(entry)).join("\n"));
+  const scid = log[0].parameters.scid;
+  await assert.rejects(
+    createResolver().resolve(`did:scid:vh:1:${scid}?src=localhost:8000`, {
+      fetch: served.fetch,
+      netPolicy: { allowPrivate: true, allowInsecure: true },
+    }),
+    /fully qualified domain/,
+  );
   assert.deepEqual(served.calls, ["http://localhost:8000/.well-known/did.jsonl"]);
 });
 
