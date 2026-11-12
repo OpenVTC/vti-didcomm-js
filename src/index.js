@@ -16,6 +16,7 @@
 export * as base64url from "./base64url.js";
 export * as multibase from "./multibase.js";
 export * as jwk from "./jwk.js";
+export * as verificationMethod from "./verification-method.js";
 export * as concatKdf from "./concat-kdf.js";
 export * as x25519 from "./x25519.js";
 export * as p256 from "./p256.js";

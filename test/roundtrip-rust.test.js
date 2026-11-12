@@ -23,6 +23,9 @@ import { pack } from "../src/pack.js";
 import { packAnoncrypt } from "../src/anoncrypt.js";
 import * as x25519 from "../src/x25519.js";
 import * as p256 from "../src/p256.js";
+import { readFileSync } from "node:fs";
+import { resolveFromArtifacts } from "../src/did-webs.js";
+import { selectKey, x25519KeyAgreement } from "../src/verification-method.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -298,5 +301,73 @@ if (!HELPER_AVAILABLE) {
 
     assert.equal(resp.ok, true, `Rust unpack failed: ${JSON.stringify(resp)}`);
     assert.equal(resp.plaintext.body.secret, "anon-p256-rust");
+  });
+
+  // did:webs parties (VTI-KEY-003): a VTA and a mediator minted by
+  // `affinidi-did-webs` 0.13.3 (test/fixtures/did-webs/parties). Their keys
+  // are `JsonWebKey` methods with ids `<did>#<CESR key>`; the key id this
+  // library writes into `skid` / `kid` must be that id exactly, or the Rust
+  // side looks up a key that does not exist.
+  const webs = (name) => {
+    const dir = resolve(HERE, "fixtures", "did-webs", "parties", name);
+    const did = readFileSync(resolve(dir, "did.txt"), "utf8").trim();
+    const { didDocument } = resolveFromArtifacts(
+      did,
+      new Uint8Array(readFileSync(resolve(dir, "keri.cesr"))),
+      new Uint8Array(readFileSync(resolve(dir, "did.json"))),
+    );
+    return { did, didDocument };
+  };
+
+  test("JS pack → Rust unpack: did:webs VTA → did:webs mediator, by their documents' key ids", async () => {
+    const vta = webs("vta");
+    const mediator = webs("mediator");
+    const vtaPrivate = new Uint8Array(32).fill(0x31);
+    const mediatorPrivate = new Uint8Array(32).fill(0x41);
+    const from = x25519KeyAgreement(vta.didDocument, vta.did);
+    const to = x25519KeyAgreement(mediator.didDocument, mediator.did);
+    assert.deepEqual(from.x25519Pub, x25519.publicKeyFrom(vtaPrivate));
+    assert.deepEqual(to.x25519Pub, x25519.publicKeyFrom(mediatorPrivate));
+
+    const message = { id: "m-webs", type: "t", from: vta.did, to: [mediator.did], body: { webs: true } };
+    const jwe = await pack({
+      message,
+      sender: { kid: from.kid, privateJwk: jwk.privateJwk("X25519", vtaPrivate, from.x25519Pub) },
+      recipient: { kid: to.kid, publicJwk: jwk.publicJwk("X25519", to.x25519Pub) },
+    });
+    const resp = await rustUnpack({
+      jwe,
+      recipient_kid: to.kid,
+      recipient_private_x_b64u: b64u.encode(mediatorPrivate),
+      sender_public_x_b64u: b64u.encode(from.x25519Pub),
+    });
+    assert.equal(resp.ok, true, `Rust unpack failed: ${JSON.stringify(resp)}`);
+    assert.equal(resp.authenticated, true);
+    assert.equal(resp.sender_kid, from.kid);
+    assert.equal(resp.recipient_kid, to.kid);
+    assert.deepEqual(resp.plaintext, message);
+  });
+
+  test("JS pack → Rust unpack: P-256 to a did:webs party's P-256 key agreement key", async () => {
+    const vta = webs("vta");
+    const key = selectKey(vta.didDocument, vta.did, "keyAgreement", { curves: ["P-256"] });
+    const sender = p256.generateKeyPair();
+    const senderKid = "did:key:zSenderP256#p256-1";
+    const message = { id: "m-webs-p256", type: "t", body: { webs: "p-256" } };
+    const jwe = await pack({
+      message,
+      sender: { kid: senderKid, privateJwk: jwk.privateJwk("P-256", sender.privateKey, sender.publicKey) },
+      recipient: { kid: key.kid, publicJwk: key.publicJwk },
+    });
+    const resp = await rustUnpack({
+      jwe,
+      curve: "P-256",
+      recipient_kid: key.kid,
+      recipient_private_x_b64u: b64u.encode(new Uint8Array(32).fill(0x34)),
+      sender_public_x_b64u: b64u.encode(sender.publicKey),
+    });
+    assert.equal(resp.ok, true, `Rust unpack failed: ${JSON.stringify(resp)}`);
+    assert.equal(resp.recipient_kid, key.kid);
+    assert.deepEqual(resp.plaintext, message);
   });
 }

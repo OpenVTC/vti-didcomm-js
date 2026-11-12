@@ -255,6 +255,21 @@ Rust error variant as `kind`). `versionTime` is refused: did:webs history is by
 key event. Not read: CBOR and MessagePack message bodies, and non-integer
 numbers in messages — refused, not skipped.
 
+A did:webs party's keys are `JsonWebKey` verification methods
+(`publicKeyJwk`, ids `<did>#<CESR key>`), and with key roles each relationship
+names its own key. Mediator auth, VTA REST auth and the VTA DIDComm client read
+keys through `./verification-method`, which takes `publicKeyJwk` and
+`publicKeyMultibase` alike and chooses a key by its relationship — so they
+authenticate and encrypt to a did:webs VTA, VTC or mediator exactly as to a
+did:webvh one, under the key ids its document writes:
+
+```js
+import { selectKey, x25519KeyAgreement } from "@openvtc/vti-didcomm-js/verification-method";
+
+const { kid, x25519Pub } = x25519KeyAgreement(didDocument, did);  // the X25519 keyAgreement key
+const signer = selectKey(didDocument, did, "assertionMethod");    // { kid, crv, publicKey, publicJwk }
+```
+
 Browsers expose no DNS API, so a public name that resolves to a private
 address passes the URL check there; `allowHosts` is the strong control. In
 Node, `guardedLookup` also filters resolved addresses at connect time:
@@ -275,6 +290,8 @@ src/
   base64url.js          RFC 4648 §5 (no padding)
   multibase.js          base58btc + multicodec varints
   jwk.js                JWK ↔ raw bytes (OKP X25519/Ed25519, EC P-256)
+  verification-method.js  DID document keys by relationship (publicKeyJwk,
+                        publicKeyMultibase)
   concat-kdf.js         NIST SP 800-56A Concat KDF (JOSE OtherInfo)
   x25519.js             X25519 key agreement (@noble/curves)
   p256.js               P-256 key agreement (@noble/curves)
