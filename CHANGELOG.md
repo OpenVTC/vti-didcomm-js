@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-11-12
+
 ### Changed
 
 - **`didwebvh-ts` 3.0** (from 2.8). did:webvh and did:scid resolution is
