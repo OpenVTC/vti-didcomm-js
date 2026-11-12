@@ -30,11 +30,14 @@
 // de-duplication both, in either direction: a historical document must
 // never be served as the current one, nor the current one as historical.
 // Methods without history (did:key, did:peer) ignore it — their document
-// is a function of the identifier and never changes.
+// is a function of the identifier and never changes. did:webs keeps history
+// by key event, not by time: it resolves a `versionId` DID URL (cached
+// under that URL, apart from the bare DID) and refuses `versionTime`.
 //
 // Per-call `options` reach the method handler unchanged, which is how
-// `netPolicy` gets to did:webvh: `resolve(did, { netPolicy })` decides
-// which hosts that method's `did.jsonl` fetch may reach, and a DID
+// `netPolicy` gets to did:webvh and did:webs: `resolve(did, { netPolicy })`
+// decides which hosts that method's `did.jsonl` (or `keri.cesr` and
+// `did.json`) fetch may reach, and a DID
 // naming a refused host throws before any request. Cached entries key on
 // the DID alone and carry no policy, so a document first resolved under
 // a relaxed policy is served as-is to later callers; a caller that needs
@@ -52,11 +55,13 @@ import * as didKey from "./did-key.js";
 import * as didWebvh from "./did-webvh.js";
 import * as didPeer from "./did-peer.js";
 import * as didScid from "./did-scid.js";
+import * as didWebs from "./did-webs.js";
 
 const DEFAULT_RESOLVERS = Object.freeze({
   key: didKey,
   webvh: didWebvh,
   peer: didPeer,
+  webs: didWebs,
 });
 
 /** Default cache lifetime for a resolved DID document (ms). */
@@ -249,7 +254,7 @@ function cacheKey(did) {
 
 /**
  * Convenience: a default resolver wired up with the built-in
- * handlers (did:key + did:peer + did:webvh + did:scid). Equivalent to
+ * handlers (did:key + did:peer + did:webvh + did:scid + did:webs). Equivalent to
  * `createResolver()`, but doesn't allocate a fresh handler map +
  * cache on every call — so this is the shared, process-wide cache.
  */

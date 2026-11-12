@@ -25,9 +25,10 @@ infrastructure for verifiable trust.
   mediator. X25519 or P-256.
 - **DID resolution** — `did:key` (Ed25519/X25519/P-256/secp256k1,
   in-tree), `did:peer` (numalgo 2, in-tree) and `did:webvh` (via
-  [`didwebvh-ts`], full hash-chain + Data-Integrity verification), and
-  `did:scid:vh:1` through the same did:webvh log. Pluggable dispatcher
-  for adding methods.
+  [`didwebvh-ts`], full hash-chain + Data-Integrity verification),
+  `did:scid:vh:1` through the same did:webvh log, and `did:webs` (in-tree:
+  KERI key event log verification and the document derived from it).
+  Pluggable dispatcher for adding methods.
 - **Forward routing** — `https://didcomm.org/routing/2.0/forward`
   wrapping.
 - **VTA REST auth** — DIDComm-packed `/auth/` challenge-response + JWT
@@ -37,12 +38,14 @@ infrastructure for verifiable trust.
   delivery, and `sendAndWait` request/response correlation.
 
 Crypto comes from Web Crypto where possible (AES-CBC, HMAC, AES-KW,
-SHA-256) and [`@noble/curves`] for X25519/Ed25519/P-256/secp256k1. No
-hand-rolled symmetric crypto or curve math — only protocol-level
+SHA-256), [`@noble/curves`] for X25519/Ed25519/P-256/secp256k1 and
+[`@noble/hashes`] for the digests KERI names (Blake3, Blake2, SHA-2, SHA-3).
+No hand-rolled symmetric crypto or curve math — only protocol-level
 orchestration.
 
 [`didwebvh-ts`]: https://www.npmjs.com/package/didwebvh-ts
 [`@noble/curves`]: https://www.npmjs.com/package/@noble/curves
+[`@noble/hashes`]: https://www.npmjs.com/package/@noble/hashes
 
 ### Not implemented (additive if a flow needs them)
 
@@ -217,6 +220,41 @@ copy unforgeable, not current. Compare did:scid references with
 `skid`, so a recipient that has never seen the sender can resolve it, and
 `unpack` returns the sender's identity — the bare DID — as `senderDid`.
 
+### did:webs
+
+A `did:webs` DID (`did:webs:<host>[%3A<port>][:<path>…]:<AID>`) is
+did:web discovery with KERI-verified key state. Resolution fetches
+`<host>/<path>/<AID>/keri.cesr` and then `did.json` — both required, both
+through the egress guard, no redirects, each capped at 4 MiB while it is read
+— verifies the whole key event stream (SAIDs, field lists, signatures against
+the signing threshold, simple or weighted; pre-rotation; witness receipts;
+delegation; superseding recovery), requires the AID to have designated this
+DID in an attestation anchored in its own log, derives the document from that
+state, and refuses a `did.json` that disagrees with it.
+
+```js
+const { didDocument, didDocumentMetadata } = await resolve(`did:webs:example.com:${aid}`);
+
+// As of a key event: `versionId` is a sequence number.
+await resolve(`did:webs:example.com:${aid}?versionId=2`);
+
+// A local host: allowPrivate admits it, and a loopback host is then fetched
+// over http. allowInsecure fetches any host over http.
+await resolve(`did:webs:localhost%3A7676:${aid}`, { netPolicy: { allowPrivate: true } });
+```
+
+The document is derived the way the Rust reference, `affinidi-did-webs`,
+derives it, including its designations: key agreement keys, services of any
+type, aliases and key roles (VTI-KEY-173), and a critical designation this
+resolver does not implement fails resolution. `@openvtc/vti-didcomm-js/did-webs`
+also exports `resolveFromArtifacts(did, keriCesr, didJson)` for artifacts
+already fetched, which reports a deactivated identifier in its metadata;
+`resolve` refuses one (`kind: "Deactivated"`), since its keys would otherwise
+read as current. Failures throw `DidWebsError` (`code: "E_DID_WEBS"`, with the
+Rust error variant as `kind`). `versionTime` is refused: did:webs history is by
+key event. Not read: CBOR and MessagePack message bodies, and non-integer
+numbers in messages — refused, not skipped.
+
 Browsers expose no DNS API, so a public name that resolves to a private
 address passes the URL check there; `allowHosts` is the strong control. In
 Node, `guardedLookup` also filters resolved addresses at connect time:
@@ -251,6 +289,12 @@ src/
   did-key.js            did:key resolver
   did-webvh.js          did:webvh resolver (via didwebvh-ts)
   did-scid.js           did:scid:vh:1 resolver, src helpers, source book
+  did-webs.js           did:webs resolver: identifier, fetch, document
+  did-webs-cesr.js      CESR primitives, counters, KERI/ACDC bodies (JSON, native)
+  did-webs-kel.js       key event log verification (thresholds, rotation, witnesses,
+                        delegation, recovery)
+  did-webs-designations.js  registries and designations (aliases, key agreement,
+                        services, key roles)
   did-peer.js           did:peer resolver (numalgo 2, in-tree)
   resolver.js           method dispatcher
   forward.js            routing/2.0/forward wrapping
@@ -265,12 +309,14 @@ src/
 ## Tests
 
 ```sh
-npm test          # node --test; 250+ tests
+npm test          # node --test; 380+ tests
 ```
 
 Includes RFC 7518 §B.3 (A256CBC-HS512) and §C (Concat KDF) known-answer
 vectors, the W3C did:key spec vectors, the DIF did:peer numalgo-2
-example, did:webvh against real `didwebvh-rs` fixtures, and
+example, did:webvh against real `didwebvh-rs` fixtures, did:webs against
+vectors recorded from `affinidi-did-webs` (its own test suite and generated
+mutation sweeps; `test/fixtures/did-webs/`), and
 cross-implementation round-trips through the Rust `affinidi-messaging-didcomm`
 unpack (`vti-didcomm-roundtrip-helper`) for both X25519 and P-256. Some
 tests reach live infra / the Rust helper and skip cleanly when

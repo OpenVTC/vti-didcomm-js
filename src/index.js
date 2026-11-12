@@ -4,7 +4,8 @@
 // B2: ECDH-1PU + AES + A256CBC-HS512 + pack/unpack. Key agreement
 //     over X25519 or P-256 (key-agreement.js dispatches by curve).
 // B3: DID resolver (did:key + did:peer in-tree, did:webvh via
-//     didwebvh-ts, did:scid:vh:1 through its did:webvh log).
+//     didwebvh-ts, did:scid:vh:1 through its did:webvh log, did:webs
+//     in-tree with its KERI key event log verification).
 // B4: VTA REST auth via DIDComm-packed /auth/.
 // M1-M4: mediator transport — mediator auth, routing/2.0/forward,
 //        WebSocket + message-pickup 3.0 live delivery, sendAndWait.
@@ -31,6 +32,8 @@ export * as didWebvh from "./did-webvh.js";
 export { DidVersionNotFoundError, DID_VERSION_NOT_FOUND } from "./did-webvh.js";
 export * as didPeer from "./did-peer.js";
 export * as didScid from "./did-scid.js";
+export * as didWebs from "./did-webs.js";
+export { DidWebsError, DID_WEBS_ERROR } from "./did-webs.js";
 export { stripScidSrc, scidSrc, withScidSrc, sameReference, scidIdentity } from "./did-scid.js";
 export {
   createResolver,

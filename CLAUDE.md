@@ -82,6 +82,20 @@ Rules that bite hardest here:
   none (every reply sits in the caller's queue and replays forever — the 0.10
   behaviour), or keying a problem report by `thid`.
 
+- **did:webs is a port of `affinidi-did-webs`, held to it by recorded
+  vectors.** `src/did-webs*.js` reimplement the Rust crate and the
+  `affinidi-keri-core` it verifies with, rule for rule and in the same order,
+  so that a refusal there is a refusal here of the same `kind`.
+  `test/fixtures/did-webs/rust-vectors/` holds what the Rust crate answered
+  (its own test suite, recorded, and generated sweeps) and the conformance
+  tests require the same answers. When the Rust crate changes what it accepts,
+  regenerate the vectors (the README there says how) and port the change; a
+  vector that disagrees is a bug in one of the two, never something to delete.
+  **What breaks it:** a plain object for message content (it reorders
+  integer-like keys, and every SAID covers member order — use the `Map`-based
+  SAD values), `JSON.parse` on a KERI message (no duplicate check, floats,
+  order), or a cache that is not a pure function of the stream.
+
 ## Releasing
 
 Consumers install from npm, so **a fix merged here changes nothing for them
