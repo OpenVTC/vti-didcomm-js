@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **did:webs: a service's `type` is compared as a set.** DID Core lets a
+  service `type` be one string or a set of strings, but the check of a
+  published `did.json` against the services the stream authorises compared
+  the JSON as written, so `"TSPTransport"` and `["TSPTransport"]` were
+  different services. A host serving the document it derives (the Rust
+  `Document` writes every `type` as an array) was refused with
+  `DocumentMismatch` ("did.json's services differ from those the stream
+  authorises") for any identifier with a designated service, such as a VTA's
+  own did:webs. `DelegatorOOBI` is recognised in either form. A different set
+  of types is still refused. Ports `affinidi-did-webs` 0.13.9.
+
 ## [0.16.0] - 2026-11-12
 
 ### Changed

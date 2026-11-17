@@ -266,6 +266,33 @@ test("the KERI 2.0 lifecycle keripy accepts resolves, with its designations", ()
   assert.equal(state.lastEventDigest, spec.kel.said);
 });
 
+test("a service's type is compared as a set, as DID Core writes it either way", () => {
+  // A host serving the document it derives writes every service `type` as an
+  // array (the Rust \`Document\` does); "X" and ["X"] are one type.
+  const spec = JSON.parse(readFileSync(resolve(FIXTURES, "ours-v2", "lifecycle.json"), "utf8"));
+  const cesr = read("ours-v2/lifecycle.keri.cesr");
+  const published = JSON.parse(readFileSync(resolve(FIXTURES, "ours-v2", "lifecycle.did.json"), "utf8"));
+  const withTypes = (types) => {
+    const doc = structuredClone(published);
+    for (const service of doc.service) if (service.type === "DIDCommMessaging") service.type = types;
+    return JSON.stringify(doc);
+  };
+  resolveFromArtifacts(spec.did, cesr, withTypes(["DIDCommMessaging"]));
+  const arrays = structuredClone(published);
+  for (const service of arrays.service) service.type = [service.type];
+  resolveFromArtifacts(spec.did, cesr, JSON.stringify(arrays));
+  // The resolver's own rendering of the document, fed back as did.json, resolves.
+  const { didDocument } = resolveFromArtifacts(spec.did, cesr, null);
+  resolveFromArtifacts(spec.did, cesr, JSON.stringify(didDocument));
+  for (const [what, types] of [
+    ["a type the stream does not authorise", ["DIDCommMessaging", "LinkedDomains"]],
+    ["no type", []],
+    ["a type that is not a string", [7]],
+  ]) {
+    assert.throws(() => resolveFromArtifacts(spec.did, cesr, withTypes(types)), refused("DocumentMismatch"), what);
+  }
+});
+
 // ─── The surface ────────────────────────────────────────────────────────
 
 test("resolve refuses versionTime: did:webs history is by key event", async () => {

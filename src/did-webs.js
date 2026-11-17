@@ -712,11 +712,20 @@ function checkPublished(derived, theirs) {
     if (!same) throw mismatch("did.json's keyRoles differ from those the AID designated");
   }
 
-  const serviceKey = (s) => (isObject(s) && s.type === "DelegatorOOBI" ? { id: s.id ?? null, type: s.type } : normalized(s, subject));
+  // A service's `type` is a string or a set of strings (DID Core §5.4), so
+  // "X" and ["X"] are one type: it is compared as a sorted set, never as the
+  // JSON it was written as. A `DelegatorOOBI` endpoint is matched by id and
+  // type only.
+  const serviceKey = (s) => {
+    if (!isObject(s)) return normalized(s, subject);
+    const type = serviceTypes(s);
+    if (isDelegatorOobi(s)) return { id: s.id ?? null, type };
+    return { ...normalized(s, subject), type };
+  };
   const ourServices = asArray(ours.service).map(serviceKey);
   const optionalDelegator =
-    derived.delegationSeal && ourServices.every((s) => !isObject(s) || s.type !== "DelegatorOOBI")
-      ? { id: derived.delegationSeal, type: "DelegatorOOBI" }
+    derived.delegationSeal && ourServices.every((s) => !isDelegatorOobi(s))
+      ? { id: derived.delegationSeal, type: ["DelegatorOOBI"] }
       : null;
   const theirServices = asArray(theirs.service).map(serviceKey);
   const contains = (list, s) => list.some((x) => jsonEqual(x, s));
@@ -756,9 +765,25 @@ function deactivatedDocument(doc) {
 
 /** Use a published `DelegatorOOBI` service when the stream gave none. */
 function carryDelegatorService(derived, published, document) {
-  if (!derived.delegationSeal || asArray(document.service).some((s) => isObject(s) && s.type === "DelegatorOOBI")) return;
-  const delegator = asArray(published?.service).find((s) => isObject(s) && s.type === "DelegatorOOBI");
+  if (!derived.delegationSeal || asArray(document.service).some(isDelegatorOobi)) return;
+  const delegator = asArray(published?.service).find(isDelegatorOobi);
   if (delegator && Array.isArray(document.service)) document.service.push(delegator);
+}
+
+/**
+ * A service's types as a sorted set: a `type` written as one string is the
+ * set holding it. Anything that is not a string is kept out, so a malformed
+ * `type` compares as no type rather than as some other one.
+ */
+function serviceTypes(service) {
+  const raw = isObject(service) ? service.type : undefined;
+  const list = typeof raw === "string" ? [raw] : Array.isArray(raw) ? raw.filter((t) => typeof t === "string") : [];
+  return [...new Set(list)].sort();
+}
+
+/** Whether `service` is a `DelegatorOOBI` endpoint, however its `type` is written. */
+function isDelegatorOobi(service) {
+  return serviceTypes(service).includes("DelegatorOOBI");
 }
 
 // ─── Derivation (`resolver.rs::derive`) ─────────────────────────────────
