@@ -162,7 +162,7 @@
     "verifiable-trust"
   ],
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.12.0"
   },
   "dependencies": {
     "@noble/curves": "^2.4.0",

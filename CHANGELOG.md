@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Node 22.12 or later.** `engines.node` is now `>=22.12.0` (was `>=20.0.0`),
+  matching `didwebvh-ts` 3.1, which already required it; CI runs on Node 22,
+  so `npm ci` no longer warns `EBADENGINE`.
+
 ## [0.16.1] - 2026-11-17
 
 ### Fixed
