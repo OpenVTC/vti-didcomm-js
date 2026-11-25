@@ -2,7 +2,7 @@
 
 Browser-side DIDComm v2 for the Verifiable Trust Infrastructure — a
 focused, dependency-light JavaScript implementation of the subset our
-auth flows need. ESM-only, runs in browsers and Node 20+.
+auth flows need. ESM-only, runs in browsers and Node 22.12+.
 
 Byte-compatible on the wire with [`affinidi-messaging-didcomm`] 0.13
 (the same crate the VTA and the ATM mediator use) — every layer is
